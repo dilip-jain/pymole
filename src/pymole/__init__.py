@@ -30,6 +30,8 @@ __all__ = [
     'create_divergence',
     'create_laplacian',
     'create_interpol',
+    'create_robin_bc',
+    'create_mixed_bc',
 ]
 
 
@@ -71,3 +73,27 @@ def create_interpol(
         from . import cpp
         return cpp.MimeticInterpol(n, h, c=c, boundary=boundary)
     return pure.MimeticInterpol(n, h, c=c, boundary=boundary)
+
+
+def create_robin_bc(
+    n: GridSize,
+    h: GridSpacing,
+    k: int = 2,
+    a: float = 1.0,
+    b: float = 0.0,
+):
+    """Create a Robin boundary-condition operator using the selected backend."""
+    if get_backend() == 'cpp':
+        # pylint: disable=import-outside-toplevel
+        from . import cpp
+        return cpp.MimeticRobinBC(n, h, k=k, a=a, b=b)
+    return pure.MimeticRobinBC(n, h, k=k, a=a, b=b)
+
+
+def create_mixed_bc(n: GridSize, h: GridSpacing, k: int = 2, **bc_dict):
+    """Create a mixed boundary-condition operator using the selected backend."""
+    if get_backend() == 'cpp':
+        # pylint: disable=import-outside-toplevel
+        from . import cpp
+        return cpp.MimeticMixedBC(n, h, k=k, **bc_dict)
+    return pure.MimeticMixedBC(n, h, k=k, **bc_dict)

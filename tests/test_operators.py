@@ -9,6 +9,8 @@ from pymole import (
     create_divergence,
     create_laplacian,
     create_interpol,
+    create_robin_bc,
+    create_mixed_bc,
     get_backend,
     use_backend,
 )
@@ -285,6 +287,12 @@ def test_public_factories_forward_python_options():
     divergence = create_divergence(dimensions, spacings, boundary="periodic", k=2)
     laplacian = create_laplacian(dimensions, spacings, boundary="periodic", k=2)
     interpolation = create_interpol(dimensions, spacings, c=(0.3, 0.4))
+    robin = create_robin_bc(9, 0.125, k=2, a=2.0, b=0.5)
+    mixed_args = {
+        "left": "Dirichlet", "coeffs_left": [2.0],
+        "right": "Robin", "coeffs_right": [3.0, 0.5],
+    }
+    mixed = create_mixed_bc(9, 0.125, k=2, **mixed_args)
 
     assert gradient.boundary == divergence.boundary == laplacian.boundary == "periodic"
     assert gradient.matrix.shape == (112, 56)
@@ -293,6 +301,14 @@ def test_public_factories_forward_python_options():
     np.testing.assert_allclose(
         interpolation.matrix.toarray(),
         MimeticInterpol(dimensions, spacings, c=(0.3, 0.4)).matrix.toarray(),
+    )
+    np.testing.assert_allclose(
+        robin.matrix.toarray(),
+        PureMimeticRobinBC(9, 0.125, k=2, a=2.0, b=0.5).matrix.toarray(),
+    )
+    np.testing.assert_allclose(
+        mixed.matrix.toarray(),
+        PureMimeticMixedBC(9, 0.125, k=2, **mixed_args).matrix.toarray(),
     )
 
 
@@ -306,6 +322,10 @@ def test_public_factories_cpp_matrix_parity():
             pytest.skip("C++ backend could not be selected")
 
         dimensions, spacings = (7, 8), (0.2, 0.15)
+        mixed_args = {
+            "left": "Dirichlet", "coeffs_left": [2.0],
+            "right": "Robin", "coeffs_right": [3.0, 0.5],
+        }
         pairs = ((
             create_gradient(dimensions, spacings, k=2),
             MimeticGradient(dimensions, spacings, k=2)
@@ -318,6 +338,12 @@ def test_public_factories_cpp_matrix_parity():
         ), (
             create_interpol(dimensions, spacings, c=(0.3, 0.4)),
             MimeticInterpol(dimensions, spacings, c=(0.3, 0.4))
+        ), (
+            create_robin_bc(9, 0.125, k=2, a=2.0, b=0.5),
+            PureMimeticRobinBC(9, 0.125, k=2, a=2.0, b=0.5)
+        ), (
+            create_mixed_bc(9, 0.125, k=2, **mixed_args),
+            PureMimeticMixedBC(9, 0.125, k=2, **mixed_args)
         ))
         for backend_operator, pure_operator in pairs:
             np.testing.assert_allclose(
@@ -485,45 +511,52 @@ def test_eigenvalue_decomposition():
 # TIME INTEGRATION TESTS (Heat Equation)
 # ============================================================================
 
+def _solve_heat_equation_1d(backend):
+    previous_backend = get_backend()
+    try:
+        if backend == "cpp":
+            _load_native_backend()
+        use_backend(backend)
+        if get_backend() != backend:
+            pytest.skip(f"{backend} backend could not be selected")
+
+        diffusivity = 0.1
+        t_final = 0.1
+        n = 50
+        h = 1.0 / (n + 1)
+
+        lap_mat = create_laplacian(n, h).matrix
+        x = np.linspace(0, 1, n + 2)
+        u0 = np.sin(np.pi * x)
+
+        def heat_ode(u, _):
+            return diffusivity * (lap_mat @ u)
+
+        t_eval = np.linspace(0, t_final, 20)
+        solution = odeint(heat_ode, u0, t_eval)
+        u_final_numerical = solution[-1, :]
+        u_final_analytical = np.sin(np.pi * x) * np.exp(-np.pi**2 * diffusivity * t_final)
+
+        interior = slice(2, -2)
+        rel_error = np.linalg.norm(
+            u_final_numerical[interior] - u_final_analytical[interior]
+        ) / np.linalg.norm(u_final_analytical[interior])
+        assert rel_error < 0.05, f"Heat equation error for {backend}: {rel_error:.4e}"
+        return u_final_numerical
+    finally:
+        use_backend(previous_backend)
+
+
 def test_heat_equation_1d():
-    """Test solving 1D heat equation u_t = k*u_xx on [0,1] x [0,T].
+    """Check the Python backend solves the 1D heat equation accurately."""
+    _solve_heat_equation_1d("python")
 
-    Analytical solution: u(x,t) = sin(pi*x) * exp(-pi^2*k*t)
-    Initial condition: u(x,0) = sin(pi*x)
-    Boundary conditions: u(0,t) = u(1,t) = 0
-    """
-    # Parameters
-    k = 0.1  # thermal diffusivity
-    t_final = 0.1
-    n = 50
-    h = 1.0 / (n + 1)
 
-    # Create Laplacian operator
-    lap = MimeticLaplacian(n, h)
-    lap_mat = lap.matrix
-
-    # Initial condition: sin(pi*x)
-    x = np.linspace(0, 1, n + 2)
-    u0 = np.sin(np.pi * x)
-
-    # ODE system: du/dt = k * L @ u
-    def heat_ode(u, _):
-        return k * (lap_mat @ u)
-
-    # Solve ODE
-    t_eval = np.linspace(0, t_final, 20)
-    solution = odeint(heat_ode, u0, t_eval)
-
-    # Check final time: should match analytical solution (approximately)
-    u_final_analytical = np.sin(np.pi * x) * np.exp(-np.pi**2 * k * t_final)
-    u_final_numerical = solution[-1, :]
-
-    # Relative error at interior points (excluding boundaries)
-    interior = slice(2, -2)
-    rel_error = np.linalg.norm(u_final_numerical[interior] - u_final_analytical[interior]) / \
-                np.linalg.norm(u_final_analytical[interior])
-
-    assert rel_error < 0.05, f"Heat equation solution error {rel_error:.4e} too large"
+def test_heat_equation_1d_backend_parity():
+    """Check C++ and Python heat-equation solutions agree end to end."""
+    python_solution = _solve_heat_equation_1d("python")
+    cpp_solution = _solve_heat_equation_1d("cpp")
+    np.testing.assert_allclose(cpp_solution, python_solution, rtol=0, atol=1e-10)
 
 def test_wave_equation_1d():
     """Test solving 1D wave equation u_tt = c^2*u_xx using method of lines.
@@ -573,177 +606,82 @@ def test_wave_equation_1d():
 
 
 # ============================================================================
-# BOUNDARY CONDITION TESTS (C++ backend)
+# NATIVE BOUNDARY AND 3D APPLICATION TESTS
 # ============================================================================
 
-@pytest.mark.skip(reason="Requires C++ backend with RobinBC bindings")
-def test_robinbc_dirichlet_limit():
-    """Test that RobinBC reduces to Dirichlet BC when b=0.
+@pytest.mark.parametrize(("a", "b"), [(1.0, 0.0), (0.0, 1.0)])
+def test_native_robin_bc_limits_match_matrix(a, b):
+    """Check Robin Dirichlet/Neumann limits and native matrix application."""
+    native = _load_native_backend()
+    n, h = 30, 1.0 / 29
+    robin = native.MimeticRobinBC(n, h, k=2, a=a, b=b)
+    pure_robin = PureMimeticRobinBC(n, h, k=2, a=a, b=b)
+    values = np.linspace(0.0, 1.0, robin.matrix.shape[1])
 
-    Robin BC: a*u + b*du/dn = f
-    When b=0: a*u = f, i.e., u = f/a (Dirichlet)
-    """
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import MimeticRobinBC
-    except ImportError:
-        pytest.skip("C++ backend not available")
+    np.testing.assert_allclose(robin.matrix.toarray(), pure_robin.matrix.toarray(), atol=1e-12)
+    np.testing.assert_allclose(robin @ values, robin.matrix @ values, atol=1e-12)
 
-    n = 30
-    h = 1.0 / (n - 1)
 
-    # Create RobinBC with b=0 (Dirichlet limit)
-    robin = MimeticRobinBC(n, h, k=2, a=1.0, b=0.0)
+def test_native_mixed_bc_1d_application_matches_matrix():
+    """Check 1D Dirichlet/Neumann mixed BC application against its matrix."""
+    native = _load_native_backend()
+    n, h = 30, 1.0 / 29
+    boundary_conditions = {
+        "left": "Dirichlet", "coeffs_left": [1.0],
+        "right": "Neumann", "coeffs_right": [0.0],
+    }
+    mixed = native.MimeticMixedBC(n, h, k=2, **boundary_conditions)
+    pure_mixed = PureMimeticMixedBC(n, h, k=2, **boundary_conditions)
+    values = np.linspace(0.0, 1.0, mixed.matrix.shape[1])
 
-    # Test vector
-    x = np.linspace(0, 1, n)
-    result = robin @ x
+    np.testing.assert_allclose(mixed.matrix.toarray(), pure_mixed.matrix.toarray(), atol=1e-12)
+    np.testing.assert_allclose(mixed @ values, mixed.matrix @ values, atol=1e-12)
 
-    # Result should be relatively smooth (no spurious oscillations)
-    assert np.isfinite(result).all(), "Result should be finite"
 
-@pytest.mark.skip(reason="Requires C++ backend with RobinBC bindings")
-def test_robinbc_neumann_limit():
-    """Test that RobinBC reduces to Neumann BC when a=0.
+def test_native_mixed_bc_2d_application_matches_matrix():
+    """Check 2D mixed BC application and its native/pure matrix parity."""
+    native = _load_native_backend()
+    dimensions, spacings = (7, 8), (0.2, 0.15)
+    boundary_conditions = {
+        "left": "Dirichlet", "coeffs_left": [1.0],
+        "right": "Neumann", "coeffs_right": [0.0],
+        "bottom": "Robin", "coeffs_bottom": [1.0, 0.5],
+        "top": "Dirichlet", "coeffs_top": [1.0],
+    }
+    mixed = native.MimeticMixedBC(dimensions, spacings, k=2, **boundary_conditions)
+    pure_mixed = PureMimeticMixedBC(dimensions, spacings, k=2, **boundary_conditions)
+    values = np.linspace(-1.0, 1.0, mixed.matrix.shape[1])
 
-    Robin BC: a*u + b*du/dn = f
-    When a=0: b*du/dn = f, i.e., du/dn = f/b (Neumann)
-    """
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import MimeticRobinBC
-    except ImportError:
-        pytest.skip("C++ backend not available")
+    np.testing.assert_allclose(mixed.matrix.toarray(), pure_mixed.matrix.toarray(), atol=1e-12)
+    np.testing.assert_allclose(mixed @ values, mixed.matrix @ values, atol=1e-12)
 
-    n = 30
-    h = 1.0 / (n - 1)
 
-    # Create RobinBC with a=0 (Neumann limit)
-    robin = MimeticRobinBC(n, h, k=2, a=0.0, b=1.0)
-
-    # Test vector
-    x = np.linspace(0, 1, n)
-    result = robin @ x
-
-    assert np.isfinite(result).all(), "Result should be finite"
-
-@pytest.mark.skip(reason="Requires C++ backend with MixedBC bindings")
-def test_mixedbc_1d_dirichlet_neumann():
-    """Test 1D MixedBC with Dirichlet on left, Neumann on right."""
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import MimeticMixedBC
-    except ImportError:
-        pytest.skip("C++ backend not available")
-
-    n = 30
-    h = 1.0 / (n - 1)
-
-    # Create MixedBC: Dirichlet on left (u=0), Neumann on right (du/dn=0)
-    mixed = MimeticMixedBC(
-        n, h, k=2,
-        left='Dirichlet', coeffs_left=[],
-        right='Neumann', coeffs_right=[]
+def test_native_3d_operator_application_matches_matrices():
+    """Check 3D native operator applications against matrices and Python parity."""
+    native = _load_native_backend()
+    dimensions, spacings = (7, 8, 9), (0.2, 0.15, 0.1)
+    native_operators = (
+        native.MimeticGradient(dimensions, spacings, k=2),
+        native.MimeticDivergence(dimensions, spacings, k=2),
+        native.MimeticLaplacian(dimensions, spacings, k=2),
+    )
+    pure_operators = (
+        MimeticGradient(dimensions, spacings, k=2),
+        MimeticDivergence(dimensions, spacings, k=2),
+        MimeticLaplacian(dimensions, spacings, k=2),
     )
 
-    x = np.linspace(0, 1, n)
-    result = mixed @ x
+    for native_operator, pure_operator in zip(native_operators, pure_operators):
+        values = np.linspace(-1.0, 1.0, native_operator.matrix.shape[1])
+        result = native_operator @ values
+        assert result.shape == (native_operator.matrix.shape[0],)
+        np.testing.assert_allclose(
+            native_operator.matrix.toarray(),
+            pure_operator.matrix.toarray(),
+            atol=1e-12
+        )
 
-    assert np.isfinite(result).all(), "Result should be finite"
-    assert result.shape == (n,), "Output shape should match input"
-
-@pytest.mark.skip(reason="Requires C++ backend with MixedBC bindings")
-def test_mixedbc_2d_mixed_conditions():
-    """Test 2D MixedBC with different conditions on each boundary."""
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import MimeticMixedBC
-    except ImportError:
-        pytest.skip("C++ backend not available")
-
-    m, n = 20, 25
-    dx, dy = 0.1, 0.08
-
-    # Create 2D MixedBC with mixed boundary types
-    mixed = MimeticMixedBC(
-        (m, n), (dx, dy), k=2,
-        left='Dirichlet', coeffs_left=[],
-        right='Neumann', coeffs_right=[],
-        bottom='Robin', coeffs_bottom=[1.0, 0.5],
-        top='Dirichlet', coeffs_top=[]
-    )
-
-    # Grid points for 2D
-    grid_size = m * n
-    x = np.random.rand(grid_size)
-    result = mixed @ x
-
-    assert np.isfinite(result).all(), "Result should be finite"
-    assert result.shape == (grid_size,), "Output shape should match input"
-
-@pytest.mark.skip(reason="Requires C++ backend with 3D bindings")
-def test_3d_gradient():
-    """Test 3D Gradient operator."""
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import Gradient
-    except ImportError:
-        pytest.skip("C++ backend not available")
-
-    m, n, o = 10, 12, 15
-    dx, dy, dz = 0.1, 0.1, 0.1
-
-    # Create 3D Gradient
-    grad = Gradient(2, m, n, o, dx, dy, dz)
-
-    # Test data
-    grid_size = m * n * o
-    x = np.random.rand(grid_size)
-    result = grad @ x
-
-    assert result.shape[1] == grid_size, "Output should match grid size"
-
-@pytest.mark.skip(reason="Requires C++ backend with 3D bindings")
-def test_3d_divergence():
-    """Test 3D Divergence operator."""
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import Divergence
-    except ImportError:
-        pytest.skip("C++ backend not available")
-
-    m, n, o = 10, 12, 15
-    dx, dy, dz = 0.1, 0.1, 0.1
-
-    # Create 3D Divergence
-    div = Divergence(2, m, n, o, dx, dy, dz)
-
-    # Test data (3 components for 3 spatial dimensions)
-    grid_size = m * n * o
-    x = np.random.rand(3 * grid_size)
-    result = div @ x
-
-    assert np.isfinite(result).all(), "Result should be finite"
-
-@pytest.mark.skip(reason="Requires C++ backend with 3D bindings")
-def test_3d_laplacian():
-    """Test 3D Laplacian operator."""
-    try:
-        # pylint: disable=import-outside-toplevel
-        from pymole.cpp import Laplacian
-    except ImportError:
-        pytest.skip("C++ backend not available")
-
-    m, n, o = 10, 12, 15
-    dx, dy, dz = 0.1, 0.1, 0.1
-
-    # Create 3D Laplacian
-    lap = Laplacian(2, m, n, o, dx, dy, dz)
-
-    # Test data
-    grid_size = m * n * o
-    x = np.ones(grid_size)
-    result = lap @ x
-
-    assert result.shape[0] == grid_size, "Output size should match input"
-    assert np.isfinite(result).all(), "Result should be finite"
+        np.testing.assert_allclose(result,
+            native_operator.matrix @ values,
+            atol=1e-12
+        )
