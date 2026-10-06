@@ -656,6 +656,76 @@ def test_native_mixed_bc_2d_application_matches_matrix():
     np.testing.assert_allclose(mixed @ values, mixed.matrix @ values, atol=1e-12)
 
 
+@pytest.mark.parametrize("operator_name", ["robin", "mixed"])
+def test_native_boundary_metadata_matches_python(operator_name):
+    """Check multidimensional boundary operators retain grid metadata."""
+    native = _load_native_backend()
+    dimensions, spacings = (7, 8), (0.2, 0.15)
+    boundary_conditions = {
+        "left": "Dirichlet", "coeffs_left": [1.0],
+        "right": "Neumann", "coeffs_right": [0.0],
+        "bottom": "Robin", "coeffs_bottom": [1.0, 0.5],
+        "top": "Dirichlet", "coeffs_top": [1.0],
+    }
+    if operator_name == "robin":
+        native_operator = native.MimeticRobinBC(dimensions, spacings, k=2)
+        pure_operator = PureMimeticRobinBC(dimensions, spacings, k=2)
+    else:
+        native_operator = native.MimeticMixedBC(dimensions, spacings, k=2, **boundary_conditions)
+        pure_operator = PureMimeticMixedBC(dimensions, spacings, k=2, **boundary_conditions)
+
+    assert native_operator.n == pure_operator.n == dimensions
+    assert native_operator.h == pure_operator.h == spacings
+
+
+@pytest.mark.parametrize("operator_name", ["robin", "mixed"])
+def test_native_boundary_matrix_rhs_matches_python(operator_name):
+    """Check native boundary operators apply to multiple right-hand sides."""
+    native = _load_native_backend()
+    n, h = 9, 0.1
+    boundary_conditions = {
+        "left": "Dirichlet", "coeffs_left": [1.0],
+        "right": "Neumann", "coeffs_right": [0.0],
+    }
+    if operator_name == "robin":
+        native_operator = native.MimeticRobinBC(n, h, k=2, a=1.0, b=0.5)
+        pure_operator = PureMimeticRobinBC(n, h, k=2, a=1.0, b=0.5)
+    else:
+        native_operator = native.MimeticMixedBC(n, h, k=2, **boundary_conditions)
+        pure_operator = PureMimeticMixedBC(n, h, k=2, **boundary_conditions)
+    values = np.linspace(-1.0, 1.0, native_operator.matrix.shape[1] * 2).reshape(-1, 2)
+
+    result = native_operator @ values
+    expected = pure_operator @ values
+    assert result.shape == expected.shape == (native_operator.matrix.shape[0], 2)
+    np.testing.assert_allclose(result, expected, atol=1e-12)
+
+
+def test_native_operator_multiple_rhs_matches_matrix():
+    """Check every native wrapper handles multiple right-hand sides correctly."""
+    native = _load_native_backend()
+    n, h = 9, 0.1
+    mixed_args = {
+        "left": "Dirichlet", "coeffs_left": [1.0],
+        "right": "Neumann", "coeffs_right": [0.0],
+    }
+    operators = (
+        native.MimeticGradient(n, h),
+        native.MimeticDivergence(n, h),
+        native.MimeticLaplacian(n, h),
+        native.MimeticInterpol(n, h),
+        native.MimeticRobinBC(n, h),
+        native.MimeticMixedBC(n, h, **mixed_args),
+    )
+
+    for operator in operators:
+        matrix = operator.matrix
+        values = np.arange(matrix.shape[1] * 2, dtype=float).reshape(-1, 2)
+        result = operator @ values
+        assert result.shape == (matrix.shape[0], 2)
+        np.testing.assert_allclose(result, matrix @ values, atol=1e-12)
+
+
 def test_native_3d_operator_application_matches_matrices():
     """Check 3D native operator applications against matrices and Python parity."""
     native = _load_native_backend()

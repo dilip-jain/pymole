@@ -53,6 +53,15 @@ def _native_matrix(operator: Optional[Any]) -> sparse.csc_matrix:
     return sparse.csc_matrix(operator.to_scipy_sparse())
 
 
+def _native_apply(operator: Any, x: np.ndarray) -> np.ndarray:
+    if x.ndim == 1:
+        return np.asarray(operator @ x)
+    return np.column_stack([
+        operator @ np.ascontiguousarray(x[:, i])
+        for i in range(x.shape[1])
+    ])
+
+
 def _boundary_type(boundary_conditions: Dict[str, Any], side: str) -> str:
     boundary_type = boundary_conditions.get(side)
     if not isinstance(boundary_type, str):
@@ -139,11 +148,7 @@ class MimeticGradient(MimeticOperator):
         cpp_operator = self._cpp_operator
         if cpp_operator is None:
             raise RuntimeError("Native operator was not initialized")
-        if x.ndim == 1:
-            return cpp_operator @ x
-        else:
-            # Apply to each column for 2D arrays
-            return np.column_stack([cpp_operator @ x[:, i] for i in range(x.shape[1])])
+        return _native_apply(cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -207,11 +212,7 @@ class MimeticDivergence(MimeticOperator):
         cpp_operator = self._cpp_operator
         if cpp_operator is None:
             raise RuntimeError("Native operator was not initialized")
-        if x.ndim == 1:
-            return cpp_operator @ x
-        else:
-            # Apply to each column for 2D arrays
-            return np.column_stack([cpp_operator @ x[:, i] for i in range(x.shape[1])])
+        return _native_apply(cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -275,11 +276,7 @@ class MimeticLaplacian(MimeticOperator):
         cpp_operator = self._cpp_operator
         if cpp_operator is None:
             raise RuntimeError("Native operator was not initialized")
-        if x.ndim == 1:
-            return cpp_operator @ x
-        else:
-            # Apply to each column for 2D arrays
-            return np.column_stack([cpp_operator @ x[:, i] for i in range(x.shape[1])])
+        return _native_apply(cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -334,9 +331,7 @@ class MimeticInterpol(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply interpolation operator: result = I @ x"""
-        if x.ndim == 1:
-            return np.asarray(self._cpp_operator @ x)
-        return np.column_stack([self._cpp_operator @ x[:, i] for i in range(x.shape[1])])
+        return _native_apply(self._cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -368,7 +363,9 @@ class MimeticRobinBC(MimeticOperator):
             b: Coefficient of Neumann component (default: 0.0)
         """
         dimensions, spacings = _normalize_grid(n, h)
-        super().__init__(dimensions[0], min(spacings))
+        super().__init__(dimensions[0], spacings[0])
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = spacings[0] if len(spacings) == 1 else spacings
         self.k = k
         self.a = a
         self.b = b
@@ -408,7 +405,7 @@ class MimeticRobinBC(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply Robin BC operator: result = R @ x"""
-        return self._cpp_operator @ x
+        return _native_apply(self._cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -444,7 +441,9 @@ class MimeticMixedBC(MimeticOperator):
                                top, coeffs_top, front, coeffs_front, back, coeffs_back
         """
         dimensions, spacings = _normalize_grid(n, h)
-        super().__init__(dimensions[0], min(spacings))
+        super().__init__(dimensions[0], spacings[0])
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = spacings[0] if len(spacings) == 1 else spacings
         self.k = k
         self._bc_dict = bc_dict
 
@@ -494,7 +493,7 @@ class MimeticMixedBC(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply Mixed BC operator: result = M @ x"""
-        return self._cpp_operator @ x
+        return _native_apply(self._cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
