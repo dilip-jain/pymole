@@ -39,6 +39,52 @@ result = grad @ x
 
 For non-periodic 1D operators, gradient maps `m + 2` nodal values to `m + 1` values, divergence maps `m + 1` values to `m + 2`, and the Laplacian is `(m + 2) x (m + 2)` and is assembled as divergence times gradient. The supplied spacing is used directly.
 
+Interpolate center values to face values with MOLE's `InterpolCtoF` operator:
+
+```python
+ctof = pymole.create_interpol_c_to_f(9, k=2)
+face_values = ctof @ np.ones(11)
+```
+
+`create_interpol_c_to_f` supports 1D, 2D, and 3D grids, orders `k=2, 4, 6, 8`,
+and periodic or non-periodic boundaries per axis. The grid sizes must satisfy
+MOLE's `m > 2*k` constraint. Unlike the other grid factories, it does not take
+grid spacing because this interpolation matrix is independent of spacing.
+
+Apply scalar boundary conditions to a sparse operator and right-hand side with `add_scalar_bc`:
+
+```python
+lap = pymole.create_laplacian(m, dx)
+A, b = pymole.add_scalar_bc(
+	lap.matrix,
+	np.zeros(m + 2),
+	m,
+	dx,
+	pymole.ScalarBoundaryConditions(
+		dc=(1.0, 1.0),
+		nc=(0.0, 0.0),
+		values=(0.0, 0.0),
+	),
+)
+```
+
+The function returns updated matrix and RHS copies. In 2D and 3D, `dc`, `nc`, and `v` follow `left/right`, `bottom/top`, and `front/back` order; `v` contains one vector per side.
+
+The lower-level MOLE operations are also available: `create_scalar_bc_lhs` returns the boundary matrix for each side, and `apply_scalar_bc_rhs` applies the supplied side-row indices to the RHS.
+
+For MOLE's in-place API and overload names, use `AddScalarBC` with its matching dimension-specific data type:
+
+```python
+bc = pymole.AddScalarBC.BC1D()
+bc.dc[:] = (1.0, 1.0)
+bc.v[:] = (0.0, 0.0)
+A = pymole.create_laplacian(m, dx).matrix.copy()
+b = np.zeros(m + 2)
+pymole.AddScalarBC.addScalarBC(A, b, 2, m, dx, bc)
+```
+
+`AddScalarBC.addScalarBClhs` accepts the output matrices as arguments, and `AddScalarBC.addScalarBCrhs` updates the provided RHS vector, matching MOLE's reference-output and in-place conventions.
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the LICENSE file for details.

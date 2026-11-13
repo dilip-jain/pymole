@@ -11,6 +11,43 @@ from scipy.sparse import csc_matrix
 _Vector = NDArray[float64]
 
 
+def add_scalar_bc(
+    matrix: object,
+    rhs: _Vector,
+    k: int,
+    dimensions: Tuple[int, ...],
+    spacings: Tuple[float, ...],
+    dc: Sequence[float],
+    nc: Sequence[float],
+    boundary_values: Sequence[Sequence[float]],
+) -> Tuple[csc_matrix, _Vector]: ...
+
+
+def create_scalar_bc_lhs(
+    k: int,
+    dimensions: Tuple[int, ...],
+    spacings: Tuple[float, ...],
+    dc: Sequence[float],
+    nc: Sequence[float],
+) -> Tuple[csc_matrix, ...]: ...
+
+
+def apply_scalar_bc_rhs(
+    rhs: _Vector,
+    dc: Sequence[float],
+    nc: Sequence[float],
+    boundary_values: Sequence[Sequence[float]],
+    side_rows: Sequence[Sequence[int]],
+) -> _Vector: ...
+
+
+def apply_scalar_bc_rhs_1d(
+    rhs: _Vector,
+    boundary_values: Sequence[float],
+    indices: Sequence[int],
+) -> _Vector: ...
+
+
 class Gradient:
     @overload
     def __init__(self, k: int, m: int, dx: float) -> None: ...
@@ -97,6 +134,25 @@ class Interpol:
         c1: float,
         c2: float,
         c3: float,
+    ) -> None: ...
+
+    def to_scipy_sparse(self) -> csc_matrix: ...
+    def apply(self, v: _Vector) -> _Vector: ...
+    def __matmul__(self, v: _Vector) -> _Vector: ...
+    def shape(self) -> Tuple[int, int]: ...
+    def nnz(self) -> int: ...
+
+
+class InterpolCtoF:
+    @overload
+    def __init__(self, k: int, m: int, dc: Sequence[int], nc: Sequence[int]) -> None: ...
+    @overload
+    def __init__(
+        self, k: int, m: int, n: int, dc: Sequence[int], nc: Sequence[int]
+    ) -> None: ...
+    @overload
+    def __init__(
+        self, k: int, m: int, n: int, o: int, dc: Sequence[int], nc: Sequence[int]
     ) -> None: ...
 
     def to_scipy_sparse(self) -> csc_matrix: ...

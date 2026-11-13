@@ -1,6 +1,6 @@
 """C++ implementation bindings for mimetic operators."""
 
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy import sparse
@@ -15,10 +15,14 @@ except ImportError as exc:
     ) from exc
 
 from ..base import MimeticOperator
-from ..pure.operators import (
-    MimeticGradient as _PureGradient,
-    MimeticDivergence as _PureDivergence,
-    MimeticLaplacian as _PureLaplacian,
+from ..pure.operators import _normalize_interpol_ctof
+from ..pure.boundary import (
+    BC1D,
+    BC2D,
+    BC3D,
+    ScalarBoundaryConditions,
+    _boundary_coefficients,
+    _normalize_boundary_values,
 )
 
 
@@ -26,6 +30,8 @@ GridDimensions = Tuple[int, ...]
 GridSpacings = Tuple[float, ...]
 GridSize = Union[int, GridDimensions]
 GridSpacing = Union[float, GridSpacings]
+Boundary = Literal['periodic', 'nonperiodic']
+AxisBoundaries = Union[Boundary, Tuple[Boundary, ...]]
 
 
 def _normalize_grid(n: GridSize, h: GridSpacing) -> Tuple[GridDimensions, GridSpacings]:
@@ -33,8 +39,10 @@ def _normalize_grid(n: GridSize, h: GridSpacing) -> Tuple[GridDimensions, GridSp
     spacings = (float(h),) if isinstance(h, (int, float)) else tuple(float(step) for step in h)
     if not 1 <= len(dimensions) <= 3 or len(dimensions) != len(spacings):
         raise ValueError("Grid dimensions and spacings must have matching 1D, 2D, or 3D lengths")
-    if any(size <= 0 for size in dimensions) or any(step <= 0 for step in spacings):
-        raise ValueError("Grid dimensions and spacings must be positive")
+    if any(size <= 0 for size in dimensions) or any(
+        not np.isfinite(step) or step <= 0 for step in spacings
+    ):
+        raise ValueError("Grid dimensions and spacings must be positive and finite")
     return dimensions, spacings
 
 
@@ -45,6 +53,32 @@ def _native_grid_operator(
     spacings: GridSpacings
 ) -> Any:
     return operator(k, *dimensions, *spacings)
+
+
+def _resolve_axis_coefficients(boundary, dimensions, dc, nc):
+    if (dc is None) != (nc is None):
+        raise ValueError("dc and nc must be supplied together")
+    if dc is not None:
+        dc_values = np.asarray(dc).reshape(-1)
+        nc_values = np.asarray(nc).reshape(-1)
+        if dc_values.size != 2 * len(dimensions) or nc_values.size != 2 * len(dimensions):
+            raise ValueError("dc and nc must contain two coefficients per axis")
+        dc_flags = np.not_equal(dc_values, 0).astype(np.int32)
+        nc_flags = np.not_equal(nc_values, 0).astype(np.int32)
+        return dc_flags.tolist(), nc_flags.tolist(), dc_flags, nc_flags
+
+    modes = (boundary,) * len(dimensions) if isinstance(boundary, str) else tuple(boundary)
+    if len(modes) != len(dimensions) or any(
+        mode not in ("periodic", "nonperiodic") for mode in modes
+    ):
+        raise ValueError("boundary must select periodic or nonperiodic for each axis")
+    dc_values = np.asarray([
+        coefficient
+        for mode in modes
+        for coefficient in ((0, 0) if mode == "periodic" else (1, 1))
+    ], dtype=np.int32)
+    nc_values = np.zeros(2 * len(dimensions), dtype=np.int32)
+    return dc_values.tolist(), nc_values.tolist(), dc_values, nc_values
 
 
 def _native_matrix(operator: Optional[Any]) -> sparse.csc_matrix:
@@ -73,23 +107,106 @@ Gradient = _operators.Gradient
 Divergence = _operators.Divergence
 Laplacian = _operators.Laplacian
 Interpol = _operators.Interpol
+InterpolCtoF = _operators.InterpolCtoF
 RobinBC = _operators.RobinBC
 MixedBC = _operators.MixedBC
 
 __all__ = [
+    'add_scalar_bc',
+    'ScalarBoundaryConditions',
+    'BC1D',
+    'BC2D',
+    'BC3D',
+    'MimeticOperator',
+    'create_scalar_bc_lhs',
+    'apply_scalar_bc_rhs',
+    'apply_scalar_bc_rhs_1d',
     'Gradient',
     'Divergence', 
     'Laplacian',
     'Interpol',
+    'InterpolCtoF',
     'RobinBC',
     'MixedBC',
     'MimeticGradient',
     'MimeticDivergence',
     'MimeticLaplacian',
     'MimeticInterpol',
+    'MimeticInterpolCtoF',
     'MimeticRobinBC',
     'MimeticMixedBC',
 ]
+
+
+def add_scalar_bc(matrix, rhs, n: GridSize, h: GridSpacing,
+                  conditions: ScalarBoundaryConditions):
+    """Apply scalar boundary conditions using MOLE's native implementation."""
+    dimensions, spacings = _normalize_grid(n, h)
+    dc, nc = _boundary_coefficients(conditions, len(dimensions))
+    values = _normalize_boundary_values(conditions.values, len(dimensions))
+    return _operators.add_scalar_bc(
+        matrix,
+        rhs,
+        conditions.k,
+        dimensions,
+        spacings,
+        dc.tolist(),
+        nc.tolist(),
+        [face_values.tolist() for face_values in values],
+    )
+
+
+def create_scalar_bc_lhs(
+    n: GridSize,
+    h: GridSpacing,
+    conditions: ScalarBoundaryConditions,
+):
+    """Create side-specific scalar boundary matrices using native MOLE."""
+    dimensions, spacings = _normalize_grid(n, h)
+    dc, nc = _boundary_coefficients(conditions, len(dimensions))
+    matrices = _operators.create_scalar_bc_lhs(
+        conditions.k, dimensions, spacings, dc.tolist(), nc.tolist()
+    )
+    return tuple(sparse.csc_matrix(matrix) for matrix in matrices)
+
+
+def apply_scalar_bc_rhs(rhs, conditions: ScalarBoundaryConditions, side_rows):
+    """Apply boundary values to indexed RHS rows using native MOLE."""
+    coefficient_count = len(conditions.dc)
+    if coefficient_count not in (2, 4, 6):
+        raise ValueError("Boundary conditions must describe a 1D, 2D, or 3D grid")
+    axis_count = coefficient_count // 2
+    dc, nc = _boundary_coefficients(conditions, axis_count)
+    values = _normalize_boundary_values(conditions.values, axis_count)
+    if len(side_rows) != 2 * axis_count:
+        raise ValueError(f"side_rows must contain {2 * axis_count} index vectors")
+
+    rhs_values = np.asarray(rhs, dtype=float)
+    if rhs_values.ndim != 1:
+        raise ValueError("rhs must be one-dimensional")
+    normalized_rows = []
+    for indices in side_rows:
+        rows = np.asarray(indices, dtype=np.uintp).reshape(-1)
+        if np.any(rows >= rhs_values.size):
+            raise ValueError("side_rows contains an index outside rhs")
+        normalized_rows.append(rows.tolist())
+
+    return _operators.apply_scalar_bc_rhs(
+        rhs_values,
+        dc.tolist(),
+        nc.tolist(),
+        [face_values.tolist() for face_values in values],
+        normalized_rows,
+    )
+
+
+def apply_scalar_bc_rhs_1d(rhs, values, indices):
+    """Apply the exact MOLE 1D RHS overload through the native extension."""
+    return _operators.apply_scalar_bc_rhs_1d(
+        rhs,
+        np.asarray(values, dtype=float).reshape(-1).tolist(),
+        np.asarray(indices, dtype=np.uintp).reshape(-1).tolist(),
+    )
 
 
 class MimeticGradient(MimeticOperator):
@@ -103,7 +220,8 @@ class MimeticGradient(MimeticOperator):
     """
 
     def __init__(self, n: GridSize, h: GridSpacing,
-                 boundary: Literal['periodic', 'nonperiodic'] = 'nonperiodic', k: int = 2):
+                 boundary: AxisBoundaries = 'nonperiodic',
+                 k: int = 2, dc=None, nc=None):
         """Initialize the C++ gradient operator.
 
         Args:
@@ -117,21 +235,24 @@ class MimeticGradient(MimeticOperator):
         self.h = spacings[0] if len(spacings) == 1 else spacings
         self._dimensions = dimensions
         self._spacings = spacings
-        self.boundary = boundary
+        dc_values, nc_values, dc_array, nc_array = _resolve_axis_coefficients(
+            boundary, dimensions, dc, nc
+        )
+        modes = tuple(
+            'periodic'
+            if not np.any(dc_array[2 * axis:2 * axis + 2])
+            and not np.any(nc_array[2 * axis:2 * axis + 2])
+            else 'nonperiodic'
+            for axis in range(len(dimensions))
+        )
+        self.boundary = boundary if dc is None else modes
         self.k = k
-        self._python_operator = None
-        if boundary == 'periodic':
-            self._python_operator = _PureGradient(n, h, boundary=boundary, k=k)
-            self._cpp_operator = None
-        elif boundary == 'nonperiodic':
-            self._cpp_operator = _native_grid_operator(_operators.Gradient, k, dimensions, spacings)
-        else:
-            raise ValueError("boundary must be 'periodic' or 'nonperiodic'")
+        self._cpp_operator = _operators.Gradient(
+            k, *dimensions, *spacings, dc_values, nc_values
+        )
 
     def _build_matrix(self) -> sparse.csc_matrix:
         """Convert C++ sparse matrix to scipy format."""
-        if self._python_operator is not None:
-            return sparse.csc_matrix(self._python_operator.matrix)
         return _native_matrix(self._cpp_operator)
 
     @property
@@ -143,12 +264,10 @@ class MimeticGradient(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply gradient operator: result = G @ x"""
-        if self._python_operator is not None:
-            return self._python_operator @ x
-        cpp_operator = self._cpp_operator
-        if cpp_operator is None:
-            raise RuntimeError("Native operator was not initialized")
-        return _native_apply(cpp_operator, x)
+        return _native_apply(self._cpp_operator, x)
+
+    def getP(self) -> np.ndarray:
+        return np.asarray(self._cpp_operator.getP(), dtype=float)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -166,7 +285,8 @@ class MimeticDivergence(MimeticOperator):
     """
 
     def __init__(self, n: GridSize, h: GridSpacing,
-                 boundary: Literal['periodic', 'nonperiodic'] = 'nonperiodic', k: int = 2):
+                 boundary: AxisBoundaries = 'nonperiodic',
+                 k: int = 2, dc=None, nc=None):
         """Initialize the C++ divergence operator.
 
         Args:
@@ -180,22 +300,24 @@ class MimeticDivergence(MimeticOperator):
         self.h = spacings[0] if len(spacings) == 1 else spacings
         self._dimensions = dimensions
         self._spacings = spacings
-        self.boundary = boundary
+        dc_values, nc_values, dc_array, nc_array = _resolve_axis_coefficients(
+            boundary, dimensions, dc, nc
+        )
+        modes = tuple(
+            'periodic'
+            if not np.any(dc_array[2 * axis:2 * axis + 2])
+            and not np.any(nc_array[2 * axis:2 * axis + 2])
+            else 'nonperiodic'
+            for axis in range(len(dimensions))
+        )
+        self.boundary = boundary if dc is None else modes
         self.k = k
-        self._python_operator = None
-        if boundary == 'periodic':
-            self._python_operator = _PureDivergence(n, h, boundary=boundary, k=k)
-            self._cpp_operator = None
-        elif boundary == 'nonperiodic':
-            self._cpp_operator = _native_grid_operator(
-                _operators.Divergence, k, dimensions, spacings)
-        else:
-            raise ValueError("boundary must be 'periodic' or 'nonperiodic'")
+        self._cpp_operator = _operators.Divergence(
+            k, *dimensions, *spacings, dc_values, nc_values
+        )
 
     def _build_matrix(self) -> sparse.csc_matrix:
         """Convert C++ sparse matrix to scipy format."""
-        if self._python_operator is not None:
-            return sparse.csc_matrix(self._python_operator.matrix)
         return _native_matrix(self._cpp_operator)
 
     @property
@@ -207,12 +329,10 @@ class MimeticDivergence(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply divergence operator: result = D @ x"""
-        if self._python_operator is not None:
-            return self._python_operator @ x
-        cpp_operator = self._cpp_operator
-        if cpp_operator is None:
-            raise RuntimeError("Native operator was not initialized")
-        return _native_apply(cpp_operator, x)
+        return _native_apply(self._cpp_operator, x)
+
+    def getQ(self) -> np.ndarray:
+        return np.asarray(self._cpp_operator.getQ(), dtype=float)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -229,8 +349,7 @@ class MimeticLaplacian(MimeticOperator):
         _cpp_operator: Underlying C++ Laplacian operator
     """
 
-    def __init__(self, n: GridSize, h: GridSpacing,
-                 boundary: Literal['periodic', 'nonperiodic'] = 'nonperiodic', k: int = 2):
+    def __init__(self, n: GridSize, h: GridSpacing, k: int = 2):
         """Initialize the C++ Laplacian operator.
 
         Args:
@@ -244,22 +363,12 @@ class MimeticLaplacian(MimeticOperator):
         self.h = spacings[0] if len(spacings) == 1 else spacings
         self._dimensions = dimensions
         self._spacings = spacings
-        self.boundary = boundary
         self.k = k
-        self._python_operator = None
-        if boundary == 'periodic':
-            self._python_operator = _PureLaplacian(n, h, boundary=boundary, k=k)
-            self._cpp_operator = None
-        elif boundary == 'nonperiodic':
-            self._cpp_operator = _native_grid_operator(
-                _operators.Laplacian, k, dimensions, spacings)
-        else:
-            raise ValueError("boundary must be 'periodic' or 'nonperiodic'")
+        self._cpp_operator = _native_grid_operator(
+            _operators.Laplacian, k, dimensions, spacings)
 
     def _build_matrix(self) -> sparse.csc_matrix:
         """Convert C++ sparse matrix to scipy format."""
-        if self._python_operator is not None:
-            return sparse.csc_matrix(self._python_operator.matrix)
         return _native_matrix(self._cpp_operator)
 
     @property
@@ -271,12 +380,7 @@ class MimeticLaplacian(MimeticOperator):
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         """Apply Laplacian operator: result = L @ x"""
-        if self._python_operator is not None:
-            return self._python_operator @ x
-        cpp_operator = self._cpp_operator
-        if cpp_operator is None:
-            raise RuntimeError("Native operator was not initialized")
-        return _native_apply(cpp_operator, x)
+        return _native_apply(self._cpp_operator, x)
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
@@ -294,8 +398,7 @@ class MimeticInterpol(MimeticOperator):
     """
 
     def __init__(self, n: GridSize, h: GridSpacing,
-                 c: Union[float, Tuple[float, ...]] = 0.5,
-                 boundary: Literal['periodic', 'nonperiodic'] = 'nonperiodic'):
+                 c: Union[float, Tuple[float, ...]] = 0.5):
         """Initialize the C++ interpolation operator.
 
         Args:
@@ -310,12 +413,9 @@ class MimeticInterpol(MimeticOperator):
         weights = (c,) * len(dimensions) if isinstance(c, (int, float)) else tuple(c)
         if len(weights) != len(dimensions) or any(not 0.0 <= weight <= 1.0 for weight in weights):
             raise ValueError("Interpolation weights must match the dimension and be in [0, 1]")
-        if boundary != 'nonperiodic':
-            raise ValueError("MOLE interpolation supports only non-periodic boundaries")
         self._dimensions = dimensions
         self._spacings = spacings
         self.c = c
-        self.boundary = boundary
         self._cpp_operator = _operators.Interpol(*dimensions, *weights)
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -335,6 +435,41 @@ class MimeticInterpol(MimeticOperator):
 
     def apply(self, x: np.ndarray) -> np.ndarray:
         """Apply the operator to vector x."""
+        return self @ x
+
+
+class MimeticInterpolCtoF(MimeticOperator):
+    """MOLE center-to-face interpolation operator using the C++ backend."""
+
+    def __init__(self, n: GridSize, boundary: AxisBoundaries = 'nonperiodic',
+                 k: int = 2, dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_interpol_ctof(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        self._cpp_operator = _operators.InterpolCtoF(
+            self.k, *dimensions, dc_values, nc_values
+        )
+
+    def _build_matrix(self) -> sparse.csc_matrix:
+        return _native_matrix(self._cpp_operator)
+
+    @property
+    def matrix(self) -> sparse.csc_matrix:
+        if self._matrix is None:
+            self._matrix = self._build_matrix()
+        return self._matrix
+
+    def __matmul__(self, x: np.ndarray) -> np.ndarray:
+        return _native_apply(self._cpp_operator, x)
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
         return self @ x
 
 
@@ -426,7 +561,7 @@ class MimeticMixedBC(MimeticOperator):
         _cpp_operator: Underlying C++ MixedBC operator
     """
 
-    def __init__(self, n: GridSize, h: GridSpacing, k: int = 2, **bc_dict: Any):
+    def __init__(self, n: GridSize, h: GridSpacing, k: int = 2, **bc_dict):
         """Initialize the C++ Mixed BC operator.
 
         Args:
