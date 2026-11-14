@@ -9,6 +9,7 @@ from .operators import (
     MimeticInterpolCtoF,
     MimeticInterpolCtoN,
     MimeticInterpolFtoC,
+    MimeticInterpolNtoC,
     MimeticRobinBC,
     MimeticMixedBC,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "MimeticInterpolCtoF",
     "MimeticInterpolCtoN",
     "MimeticInterpolFtoC",
+    "MimeticInterpolNtoC",
     "MimeticRobinBC",
     "MimeticMixedBC",
 ]

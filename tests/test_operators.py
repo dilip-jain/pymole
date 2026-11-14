@@ -14,6 +14,7 @@ from pymole import (
     create_interpol_c_to_f,
     create_interpol_c_to_n,
     create_interpol_f_to_c,
+    create_interpol_n_to_c,
     create_robin_bc,
     create_mixed_bc,
     add_scalar_bc,
@@ -35,6 +36,7 @@ from pymole.pure.operators import (
     MimeticInterpolCtoF,
     MimeticInterpolCtoN,
     MimeticInterpolFtoC,
+    MimeticInterpolNtoC,
     MimeticRobinBC as PureMimeticRobinBC,
     MimeticMixedBC as PureMimeticMixedBC,
 )
@@ -1081,6 +1083,65 @@ def test_ftoc_factory_and_validation():
         use_backend(previous_backend)
 
 
+@pytest.mark.parametrize(
+    ("k", "m", "first_col", "expected_row"),
+    [
+        (2, 5, 0, (0.5, 0.5)),
+        (4, 9, 0, (35 / 128, 140 / 128, -70 / 128, 28 / 128, -5 / 128)),
+        (6, 13, 0, (231 / 1024, 1386 / 1024, -1155 / 1024, 924 / 1024,
+                    -495 / 1024, 154 / 1024, -21 / 1024)),
+        (8, 17, 0, (6435 / 32768, 6435 / 4096, -15015 / 8192, 9009 / 4096,
+                    -32175 / 16384, 5005 / 4096, -4095 / 8192, 495 / 4096,
+                    -429 / 32768)),
+    ],
+)
+def test_ntoc_nonperiodic_1d_matches_pinned_mole_rows(k, m, first_col, expected_row):
+    """Check node-to-center boundary stencils from pinned MOLE C++."""
+    operator = MimeticInterpolNtoC(m, k=k)
+    matrix = operator.matrix.toarray()
+    assert matrix.shape == (m + 2, m + 1)
+    np.testing.assert_allclose(matrix[0, 0], 1.0)
+    np.testing.assert_allclose(
+        matrix[1, first_col:first_col + len(expected_row)], expected_row
+    )
+    np.testing.assert_allclose(matrix[m + 1, m], 1.0)
+    np.testing.assert_allclose(operator @ np.ones(m + 1), np.ones(m + 2))
+
+
+def test_ntoc_periodic_multidimensional_shapes_and_factory():
+    """Check periodic NtoC coefficients and tensor-product assembly."""
+    periodic = MimeticInterpolNtoC(9, boundary="periodic", k=4)
+    assert periodic.matrix.shape == (9, 9)
+    assert periodic.matrix[0, 0] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 1] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 2] == pytest.approx(-8 / 128)
+    assert periodic.matrix[0, 8] == pytest.approx(-8 / 128)
+
+    nonperiodic_2d = MimeticInterpolNtoC((9, 10), k=2)
+    mixed_3d = MimeticInterpolNtoC(
+        (9, 10, 11), boundary=("periodic", "nonperiodic", "periodic"), k=2
+    )
+    assert nonperiodic_2d.matrix.shape == (132, 110)
+    assert mixed_3d.matrix.shape == (1188, 1089)
+    for operator in (periodic, nonperiodic_2d, mixed_3d):
+        np.testing.assert_allclose(
+            operator @ np.ones(operator.matrix.shape[1]),
+            np.ones(operator.matrix.shape[0]),
+        )
+
+    previous_backend = get_backend()
+    use_backend("python")
+    try:
+        assert inspect.signature(create_interpol_n_to_c) == inspect.signature(
+            MimeticInterpolNtoC
+        )
+        assert create_interpol_n_to_c(9, k=2).matrix.shape == (11, 10)
+        with pytest.raises(ValueError, match="m > 2\\*k"):
+            MimeticInterpolNtoC(4, k=2)
+    finally:
+        use_backend(previous_backend)
+
+
 def test_public_factories_cpp_matrix_parity():
     """Test: Native matrix parity for C++ backend."""
     _load_native_backend()
@@ -1116,6 +1177,9 @@ def test_public_factories_cpp_matrix_parity():
         ), (
             create_interpol_f_to_c(9, k=2),
             MimeticInterpolFtoC(9, k=2)
+        ), (
+            create_interpol_n_to_c(9, k=2),
+            MimeticInterpolNtoC(9, k=2)
         ), (
             create_robin_bc(9, 0.125, k=2, a=2.0, b=0.5),
             PureMimeticRobinBC(9, 0.125, k=2, a=2.0, b=0.5)

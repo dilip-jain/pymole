@@ -788,6 +788,38 @@ class MimeticInterpolFtoC(_PureMimeticOperator):
         return self._matrix
 
 
+class MimeticInterpolNtoC(_PureMimeticOperator):
+    """MOLE node-to-center interpolation operator for 1D, 2D, and 3D grids."""
+
+    def __init__(self, n: Union[int, Tuple[int, ...]],
+                 boundary: AxisBoundaries = "nonperiodic", k: int = 2,
+                 dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        axes = []
+        for axis, size in enumerate(dimensions):
+            periodic = (
+                not any(dc_values[2 * axis:2 * axis + 2])
+                and not any(nc_values[2 * axis:2 * axis + 2])
+            )
+            axes.append(_build_mole_ftoc_axis(size, self.k, periodic))
+        matrix = axes[0]
+        for axis in axes[1:]:
+            matrix = sparse.kron(axis, matrix, format="csc")
+        self._matrix = csc_matrix(matrix)
+
+    def _build_matrix(self) -> csc_matrix:
+        return self._matrix
+
+
 class MimeticInterpol(_PureMimeticOperator):
     """MOLE interpolation from nodal values to staggered values."""
 

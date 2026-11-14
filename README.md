@@ -53,7 +53,8 @@ grid spacing because this interpolation matrix is independent of spacing.
 Use `create_interpol_c_to_n` for the corresponding center-to-node operator;
 use `create_interpol_f_to_c` to interpolate face values to centers. CtoN uses
 tensor-product assembly in multiple dimensions, while FtoC assembles the
-directional blocks with MOLE's staggered-grid shapes.
+directional blocks with MOLE's staggered-grid shapes. Use
+`create_interpol_n_to_c` to interpolate nodal values to centers.
 
 Apply scalar boundary conditions to a sparse operator and right-hand side with `add_scalar_bc`:
 
