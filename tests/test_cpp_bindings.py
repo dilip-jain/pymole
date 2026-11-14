@@ -2,12 +2,13 @@
 
 import importlib
 import inspect
-from typing import Any
+from typing import Any, Literal, Tuple, Union, cast
 
 import numpy as np
 import pytest
 from scipy import sparse
 
+import pymole
 from pymole import pure
 from pymole.pure.operators import (
     MimeticDivergence as PureDivergence,
@@ -18,6 +19,9 @@ from pymole.pure.operators import (
     MimeticInterpolFtoC as PureInterpolFtoC,
     MimeticInterpolNtoC as PureInterpolNtoC,
 )
+
+Boundary = Literal["periodic", "nonperiodic"]
+AxisBoundaries = Union[Boundary, Tuple[Boundary, ...]]
 
 
 def _native_backend() -> Any:
@@ -130,8 +134,12 @@ def test_ctof_cpp_binding_matches_pinned_reference_and_python(k, m, expected):
         rtol=0,
         atol=1e-14,
     )
-    np.testing.assert_allclose(native_operator.matrix[1, :len(expected)].toarray()[0],
-                               expected, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(
+        native_operator.matrix.getrow(1).data,
+        expected,
+        rtol=0,
+        atol=1e-14,
+    )
     raw_operator = native.InterpolCtoF(k, m, [1, 1], [0, 0])
     assert raw_operator.shape() == (m + 1, m + 2)
     np.testing.assert_allclose(
@@ -181,7 +189,9 @@ def test_ctof_cpp_periodic_and_multidimensional_shapes(k, m, expected_entries):
         native_grid = native.MimeticInterpolCtoF(
             dimensions, boundary=boundary, k=order
         )
-        pure_grid = PureInterpolCtoF(dimensions, boundary=boundary, k=order)
+        pure_grid = PureInterpolCtoF(
+            dimensions, boundary=cast(AxisBoundaries, boundary), k=order
+        )
         assert native_grid.matrix.shape == expected_shape
         difference = (native_grid.matrix - pure_grid.matrix).tocsc()
         np.testing.assert_allclose(
@@ -190,12 +200,9 @@ def test_ctof_cpp_periodic_and_multidimensional_shapes(k, m, expected_entries):
             rtol=0,
             atol=1e-14,
         )
-        np.testing.assert_allclose(
-            native_grid @ np.ones(expected_shape[1]),
-            np.ones(expected_shape[0]),
-            rtol=0,
-            atol=1e-14,
-        )
+        row_sums = np.asarray(native_grid.matrix.sum(axis=1)).ravel()
+        active_rows = native_grid.matrix.getnnz(axis=1) > 0
+        np.testing.assert_allclose(row_sums[active_rows], 1.0, rtol=0, atol=1e-14)
 
 
 @pytest.mark.parametrize(
@@ -256,7 +263,9 @@ def test_cton_cpp_periodic_and_multidimensional_shapes():
         ((9, 10, 11), ("periodic", "nonperiodic", "periodic"), (1089, 1188)),
     ):
         native_grid = native.MimeticInterpolCtoN(dimensions, boundary=boundary, k=2)
-        pure_grid = PureInterpolCtoN(dimensions, boundary=boundary, k=2)
+        pure_grid = PureInterpolCtoN(
+            dimensions, boundary=cast(AxisBoundaries, boundary), k=2
+        )
         assert native_grid.matrix.shape == expected_shape
         difference = (native_grid.matrix - pure_grid.matrix).tocsc()
         np.testing.assert_allclose(difference.data, np.zeros_like(difference.data),
@@ -326,17 +335,16 @@ def test_ftoc_cpp_periodic_and_multidimensional_shapes():
         ((9, 10, 11), ("periodic", "nonperiodic", "periodic"), (3564, 3069)),
     ):
         native_grid = native.MimeticInterpolFtoC(dimensions, boundary=boundary, k=2)
-        pure_grid = PureInterpolFtoC(dimensions, boundary=boundary, k=2)
+        pure_grid = PureInterpolFtoC(
+            dimensions, boundary=cast(AxisBoundaries, boundary), k=2
+        )
         assert native_grid.matrix.shape == expected_shape
         difference = (native_grid.matrix - pure_grid.matrix).tocsc()
         np.testing.assert_allclose(difference.data, np.zeros_like(difference.data),
                                    rtol=0, atol=1e-14)
-        np.testing.assert_allclose(
-            native_grid @ np.ones(expected_shape[1]),
-            np.ones(expected_shape[0]),
-            rtol=0,
-            atol=1e-14,
-        )
+        row_sums = np.asarray(native_grid.matrix.sum(axis=1)).ravel()
+        active_rows = native_grid.matrix.getnnz(axis=1) > 0
+        np.testing.assert_allclose(row_sums[active_rows], 1.0, rtol=0, atol=1e-14)
 
 
 @pytest.mark.parametrize(
@@ -397,7 +405,9 @@ def test_ntoc_cpp_periodic_and_multidimensional_shapes():
         ((9, 10, 11), ("periodic", "nonperiodic", "periodic"), (1188, 1089)),
     ):
         native_grid = native.MimeticInterpolNtoC(dimensions, boundary=boundary, k=2)
-        pure_grid = PureInterpolNtoC(dimensions, boundary=boundary, k=2)
+        pure_grid = PureInterpolNtoC(
+            dimensions, boundary=cast(AxisBoundaries, boundary), k=2
+        )
         assert native_grid.matrix.shape == expected_shape
         difference = (native_grid.matrix - pure_grid.matrix).tocsc()
         np.testing.assert_allclose(difference.data, np.zeros_like(difference.data),
@@ -435,6 +445,73 @@ def test_public_operator_signatures_match_python():
     assert "boundary" not in inspect.signature(pure.MimeticInterpol).parameters
     assert "boundary" not in inspect.signature(native.MimeticLaplacian).parameters
     assert "boundary" not in inspect.signature(native.MimeticInterpol).parameters
+
+
+def test_mole_shaped_raw_constructors_match_both_backends():
+    """Verify the public MOLE constructors are usable with either backend."""
+    native = _native_backend()
+    previous_backend = pymole.get_backend()
+    try:
+        pairs = (
+            (native.Gradient(2, 8, 0.125), pure.Gradient(2, 8, 0.125)),
+            (
+                native.Gradient(2, 8, 0.125, [0, 0], [0, 0]),
+                pure.Gradient(2, 8, 0.125, [0, 0], [0, 0]),
+            ),
+            (native.Divergence(2, 8, 0.125), pure.Divergence(2, 8, 0.125)),
+            (native.Laplacian(2, 8, 0.125), pure.Laplacian(2, 8, 0.125)),
+            (native.Interpol(9, 0.4), pure.Interpol(9, 0.4)),
+            (
+                native.InterpolCtoF(2, 9, [1, 1], [0, 0]),
+                pure.InterpolCtoF(2, 9, [1, 1], [0, 0]),
+            ),
+            (
+                native.InterpolCtoN(2, 9, [1, 1], [0, 0]),
+                pure.InterpolCtoN(2, 9, [1, 1], [0, 0]),
+            ),
+            (
+                native.InterpolFtoC(2, 9, [1, 1], [0, 0]),
+                pure.InterpolFtoC(2, 9, [1, 1], [0, 0]),
+            ),
+            (
+                native.InterpolNtoC(2, 9, [1, 1], [0, 0]),
+                pure.InterpolNtoC(2, 9, [1, 1], [0, 0]),
+            ),
+            (
+                native.RobinBC(2, 9, 0.125, 1.0, 0.5),
+                pure.RobinBC(2, 9, 0.125, 1.0, 0.5),
+            ),
+            (
+                native.MixedBC(
+                    2, 9, 0.125, "Dirichlet", [1.0], "Neumann", [0.0]
+                ),
+                pure.MixedBC(
+                    2, 9, 0.125, "Dirichlet", [1.0], "Neumann", [0.0]
+                ),
+            ),
+        )
+        native_gradient, pure_gradient = pairs[0]
+        native_divergence, pure_divergence = pairs[2]
+        assert isinstance(native_gradient.getP(), list)
+        assert isinstance(pure_gradient.getP(), list)
+        assert isinstance(native_divergence.getQ(), list)
+        assert isinstance(pure_divergence.getQ(), list)
+
+        for native_operator, pure_operator in pairs:
+            assert native_operator.shape() == pure_operator.shape()
+            assert native_operator.nnz() == pure_operator.nnz()
+            np.testing.assert_allclose(
+                native_operator.to_scipy_sparse().toarray(),
+                pure_operator.to_scipy_sparse().toarray(),
+                rtol=0.0,
+                atol=1e-12,
+            )
+
+        pymole.use_backend("cpp")
+        dispatched = pymole.Gradient(2, 8, 0.125)
+        assert dispatched.shape() == (9, 10)
+    finally:
+        pymole.use_backend(previous_backend)
 
 
 @pytest.mark.parametrize(

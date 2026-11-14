@@ -1,7 +1,7 @@
 """Base classes and interfaces for PyMOLE operators."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy.sparse import csc_matrix
@@ -68,3 +68,15 @@ class MimeticOperator(ABC):
         if self._matrix is None:
             self._matrix = self._build_matrix()
         return self._matrix
+
+    def to_scipy_sparse(self) -> csc_matrix:
+        """Return the operator in SciPy CSC format."""
+        return csc_matrix(self.matrix)
+
+    def shape(self) -> Tuple[int, int]:
+        """Return the matrix dimensions as ``(rows, columns)``."""
+        return self.matrix.get_shape()
+
+    def nnz(self) -> int:
+        """Return the number of stored non-zero matrix entries."""
+        return int(self.matrix.nnz)

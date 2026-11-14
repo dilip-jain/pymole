@@ -37,6 +37,12 @@ x = np.linspace(0.0, 1.0, m + 2)
 result = grad @ x
 ```
 
+The MOLE C++ constructor forms are also exposed at package level and use the
+selected backend. For example, `pymole.Gradient(k, m, dx)` and
+`pymole.InterpolCtoF(k, m, dc, nc)` accept the same arguments whether the
+Python or C++ backend is selected. `pymole.cpp.Gradient` and
+`pymole.pure.Gradient` expose the corresponding backend-specific constructors.
+
 For non-periodic 1D operators, gradient maps `m + 2` nodal values to `m + 1` values, divergence maps `m + 1` values to `m + 2`, and the Laplacian is `(m + 2) x (m + 2)` and is assembled as divergence times gradient. The supplied spacing is used directly.
 
 Interpolate center values to face values with MOLE's `InterpolCtoF` operator:

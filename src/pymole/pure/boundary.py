@@ -123,31 +123,36 @@ def _active_boundary_axes(dc: np.ndarray, nc: np.ndarray, axis_count: int) -> Tu
 
 
 def _lift_boundary_matrix(
-    matrix: csc_matrix,
+    matrix: object,
     axis: int,
     dimensions: GridDimensions,
     active_axes: Tuple[bool, ...],
 ) -> csc_matrix:
-    lifted: Optional[csc_matrix] = None
+    boundary_matrix = csc_matrix(matrix, dtype=float)
+    factors: List[csc_matrix] = []
     for current_axis in reversed(range(len(dimensions))):
         if current_axis == axis:
-            factor = matrix
+            factor = boundary_matrix
         else:
             size = (
                 dimensions[current_axis] + 2
                 if active_axes[current_axis]
                 else dimensions[current_axis]
             )
-            factor = sparse.eye(size, format="lil", dtype=float)
+            factor = sparse.lil_matrix((size, size), dtype=float)
+            factor.setdiag(np.ones(size))
             if current_axis > axis and active_axes[current_axis]:
                 factor[0, 0] = 0.0
                 factor[-1, -1] = 0.0
-            factor = factor.tocsc()
-        if lifted is None:
-            lifted = factor
-        else:
-            lifted = sparse.kron(lifted, factor, format="csc")
-    return csc_matrix(lifted)
+            factor = csc_matrix(factor)
+        factors.append(factor)
+
+    if not factors:
+        raise ValueError("A boundary matrix requires at least one grid dimension")
+    lifted = factors[0]
+    for factor in factors[1:]:
+        lifted = csc_matrix(sparse.kron(lifted, factor, format="csc"))
+    return lifted
 
 
 def _axis_side_matrices(

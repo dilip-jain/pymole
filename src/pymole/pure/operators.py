@@ -1,6 +1,7 @@
 """Pure Python implementation of mimetic operators."""
 
-from typing import List, Literal, Optional, Sequence, Tuple, Union
+from abc import ABC
+from typing import List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 from scipy import sparse
@@ -322,8 +323,8 @@ _MOLE_DIVERGENCE_BOUNDARIES = {
 }
 
 
-class _PureMimeticOperator(MimeticOperator):
-    boundary: Boundary
+class _PureMimeticOperator(MimeticOperator, ABC):
+    boundary: AxisBoundaries
 
     def __matmul__(self, x: np.ndarray) -> np.ndarray:
         return self.matrix @ x
@@ -350,7 +351,12 @@ class MimeticGradient(_PureMimeticOperator):
         self._matrix = self._build_matrix()
 
     @staticmethod
-    def _resolve_boundary(boundary, dimensions, dc, nc):
+    def _resolve_boundary(
+        boundary: AxisBoundaries,
+        dimensions: Tuple[int, ...],
+        dc: Optional[Sequence[int]],
+        nc: Optional[Sequence[int]],
+    ) -> AxisBoundaries:
         if (dc is None) != (nc is None):
             raise ValueError("dc and nc must be supplied together")
         if dc is None:
@@ -360,13 +366,14 @@ class MimeticGradient(_PureMimeticOperator):
         expected_size = 2 * len(dimensions)
         if dc_values.size != expected_size or nc_values.size != expected_size:
             raise ValueError(f"dc and nc must each contain {expected_size} coefficients")
-        return tuple(
+        modes = tuple(
             'periodic'
             if not np.any(dc_values[2 * axis:2 * axis + 2])
             and not np.any(nc_values[2 * axis:2 * axis + 2])
             else 'nonperiodic'
             for axis in range(len(dimensions))
         )
+        return cast(AxisBoundaries, modes)
 
     def getP(self) -> np.ndarray:
         if len(self._dimensions) != 1 or _axis_boundaries(self.boundary, 1)[0] == 'periodic':
@@ -498,7 +505,13 @@ _MOLE_CENTER_INTERPOLATOR_PERIODIC = {
 }
 
 
-def _normalize_center_interpolator(n, boundary, k, dc, nc):
+def _normalize_center_interpolator(
+    n: Union[int, Tuple[int, ...]],
+    boundary: AxisBoundaries,
+    k: int,
+    dc: Optional[Sequence[int]],
+    nc: Optional[Sequence[int]],
+) -> Tuple[Tuple[int, ...], List[int], List[int], AxisBoundaries]:
     dimensions = (n,) if isinstance(n, (int, np.integer)) else tuple(n)
     if not 1 <= len(dimensions) <= 3:
         raise ValueError("Center interpolation supports 1D, 2D, and 3D grids")
@@ -522,13 +535,13 @@ def _normalize_center_interpolator(n, boundary, k, dc, nc):
         expected = 2 * len(dimensions)
         if dc_values.size != expected or nc_values.size != expected:
             raise ValueError(f"dc and nc must each contain {expected} coefficients")
-        modes = tuple(
+        modes = cast(AxisBoundaries, tuple(
             "periodic"
             if not np.any(dc_values[2 * axis:2 * axis + 2])
             and not np.any(nc_values[2 * axis:2 * axis + 2])
             else "nonperiodic"
             for axis in range(len(dimensions))
-        )
+        ))
         return dimensions, dc_values.tolist(), nc_values.tolist(), modes
 
     modes = _axis_boundaries(boundary, len(dimensions))
@@ -578,7 +591,8 @@ def _build_mole_ctof(dimensions: Tuple[int, ...], k: int, dc, nc) -> csc_matrix:
         if periodic:
             selectors.append(csc_matrix(sparse.eye(size, format="csc")))
         else:
-            selectors.append(csc_matrix(sparse.eye(size + 2, format="csc")[1:-1, :]))
+            identity = csc_matrix(sparse.eye(size + 2, format="csc"))
+            selectors.append(identity[1:-1, :])
 
     components = []
     if len(dimensions) == 1:
@@ -619,6 +633,8 @@ class MimeticInterpolCtoF(_PureMimeticOperator):
         self._matrix = _build_mole_ctof(dimensions, self.k, dc_values, nc_values)
 
     def _build_matrix(self) -> csc_matrix:
+        if self._matrix is None:
+            raise RuntimeError("MOLE center-to-face matrix was not initialized")
         return self._matrix
 
 
@@ -651,6 +667,8 @@ class MimeticInterpolCtoN(_PureMimeticOperator):
         self._matrix = csc_matrix(matrix)
 
     def _build_matrix(self) -> csc_matrix:
+        if self._matrix is None:
+            raise RuntimeError("MOLE center-to-node matrix was not initialized")
         return self._matrix
 
 
@@ -785,6 +803,8 @@ class MimeticInterpolFtoC(_PureMimeticOperator):
             ))
 
     def _build_matrix(self) -> csc_matrix:
+        if self._matrix is None:
+            raise RuntimeError("MOLE face-to-center matrix was not initialized")
         return self._matrix
 
 
@@ -817,6 +837,8 @@ class MimeticInterpolNtoC(_PureMimeticOperator):
         self._matrix = csc_matrix(matrix)
 
     def _build_matrix(self) -> csc_matrix:
+        if self._matrix is None:
+            raise RuntimeError("MOLE node-to-center matrix was not initialized")
         return self._matrix
 
 

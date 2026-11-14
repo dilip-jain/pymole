@@ -2,7 +2,7 @@
 
 # pylint: disable=missing-class-docstring,missing-function-docstring,too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
 
-from typing import Sequence, Tuple, overload
+from typing import List, Sequence, Tuple, overload
 
 from numpy import float64
 from numpy.typing import NDArray
@@ -64,12 +64,41 @@ class Gradient:
         dy: float,
         dz: float,
     ) -> None: ...
+    @overload
+    def __init__(
+        self, k: int, m: int, dx: float, dc: Sequence[int], nc: Sequence[int]
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        n: int,
+        dx: float,
+        dy: float,
+        dc: Sequence[int],
+        nc: Sequence[int],
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        n: int,
+        o: int,
+        dx: float,
+        dy: float,
+        dz: float,
+        dc: Sequence[int],
+        nc: Sequence[int],
+    ) -> None: ...
 
     def to_scipy_sparse(self) -> csc_matrix: ...
     def apply(self, v: _Vector) -> _Vector: ...
     def __matmul__(self, v: _Vector) -> _Vector: ...
     def shape(self) -> Tuple[int, int]: ...
     def nnz(self) -> int: ...
+    def getP(self) -> List[float]: ...
 
 
 class Divergence:
@@ -88,12 +117,41 @@ class Divergence:
         dy: float,
         dz: float,
     ) -> None: ...
+    @overload
+    def __init__(
+        self, k: int, m: int, dx: float, dc: Sequence[int], nc: Sequence[int]
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        n: int,
+        dx: float,
+        dy: float,
+        dc: Sequence[int],
+        nc: Sequence[int],
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        n: int,
+        o: int,
+        dx: float,
+        dy: float,
+        dz: float,
+        dc: Sequence[int],
+        nc: Sequence[int],
+    ) -> None: ...
 
     def to_scipy_sparse(self) -> csc_matrix: ...
     def apply(self, v: _Vector) -> _Vector: ...
     def __matmul__(self, v: _Vector) -> _Vector: ...
     def shape(self) -> Tuple[int, int]: ...
     def nnz(self) -> int: ...
+    def getQ(self) -> List[float]: ...
 
 
 class Laplacian:

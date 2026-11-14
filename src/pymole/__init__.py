@@ -12,7 +12,7 @@ Original MOLE Copyright (C) CSRC-SDSU
 Repository: https://github.com/csrc-sdsu/mole
 """
 
-from typing import Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy import sparse
@@ -33,6 +33,16 @@ GridSpacing = Union[float, Tuple[float, ...]]
 __all__ = [
     'use_backend',
     'get_backend',
+    'Gradient',
+    'Divergence',
+    'Laplacian',
+    'Interpol',
+    'InterpolCtoF',
+    'InterpolCtoN',
+    'InterpolFtoC',
+    'InterpolNtoC',
+    'RobinBC',
+    'MixedBC',
     'create_gradient',
     'create_divergence',
     'create_laplacian',
@@ -52,6 +62,33 @@ __all__ = [
     'BC3D',
     'AddScalarBC',
 ]
+
+
+def _mole_operator_factory(name: str):
+    def construct(*args: Any, **kwargs: Any) -> Any:
+        if get_backend() == 'cpp':
+            # pylint: disable=import-outside-toplevel
+            from . import cpp
+            backend_module = cpp
+        else:
+            backend_module = pure
+        return getattr(backend_module, name)(*args, **kwargs)
+
+    construct.__name__ = name
+    construct.__qualname__ = name
+    return construct
+
+
+Gradient = _mole_operator_factory('Gradient')
+Divergence = _mole_operator_factory('Divergence')
+Laplacian = _mole_operator_factory('Laplacian')
+Interpol = _mole_operator_factory('Interpol')
+InterpolCtoF = _mole_operator_factory('InterpolCtoF')
+InterpolCtoN = _mole_operator_factory('InterpolCtoN')
+InterpolFtoC = _mole_operator_factory('InterpolFtoC')
+InterpolNtoC = _mole_operator_factory('InterpolNtoC')
+RobinBC = _mole_operator_factory('RobinBC')
+MixedBC = _mole_operator_factory('MixedBC')
 
 
 def create_gradient(

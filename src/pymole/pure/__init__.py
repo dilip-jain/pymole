@@ -22,6 +22,18 @@ from .boundary import (
     apply_scalar_bc_rhs,
     create_scalar_bc_lhs,
 )
+from .mole import (
+    Divergence,
+    Gradient,
+    Interpol,
+    InterpolCtoF,
+    InterpolCtoN,
+    InterpolFtoC,
+    InterpolNtoC,
+    Laplacian,
+    MixedBC,
+    RobinBC,
+)
 
 __all__ = [
     "add_scalar_bc",
@@ -42,4 +54,14 @@ __all__ = [
     "MimeticInterpolNtoC",
     "MimeticRobinBC",
     "MimeticMixedBC",
+    "Gradient",
+    "Divergence",
+    "Laplacian",
+    "Interpol",
+    "InterpolCtoF",
+    "InterpolCtoN",
+    "InterpolFtoC",
+    "InterpolNtoC",
+    "RobinBC",
+    "MixedBC",
 ]

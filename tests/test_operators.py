@@ -1,12 +1,23 @@
 """Tests for PyMOLE operators."""
 
 import inspect
+from typing import Any, Callable, Tuple
 
 import numpy as np
 import pytest
 from scipy import sparse
 from scipy.integrate import odeint
 from pymole import (
+    Gradient,
+    Divergence,
+    Laplacian,
+    Interpol,
+    InterpolCtoF,
+    InterpolCtoN,
+    InterpolFtoC,
+    InterpolNtoC,
+    RobinBC,
+    MixedBC,
     create_gradient,
     create_divergence,
     create_laplacian,
@@ -42,7 +53,7 @@ from pymole.pure.operators import (
 )
 
 
-def _load_native_backend():
+def _load_native_backend() -> Any:
     try:
         # pylint: disable=import-outside-toplevel
         import pymole.cpp as native
@@ -59,6 +70,10 @@ def _load_native_backend():
     return native
 
 
+def _call_with_unsupported_boundary(callable_: Callable[..., Any]) -> Any:
+    return callable_(8, 0.125, **{"boundary": "periodic"})
+
+
 # ============================================================================
 # INPUT VALIDATION TESTS
 # ============================================================================
@@ -69,6 +84,130 @@ def test_operator_validation():
         MimeticGradient(0, 1.0)  # Invalid grid points
     with pytest.raises(ValueError):
         MimeticGradient(10, -1.0)  # Invalid grid spacing
+
+
+def test_mole_shaped_operators_dispatch_to_the_selected_backend():
+    """Keep MOLE's constructor forms available through backend selection."""
+    previous_backend = get_backend()
+    use_backend("python")
+    try:
+        operators = (
+            (Gradient(2, 8, 0.125), create_gradient(8, 0.125)),
+            (Divergence(2, 8, 0.125), create_divergence(8, 0.125)),
+            (Laplacian(2, 8, 0.125), create_laplacian(8, 0.125)),
+            (Interpol(9, 0.4), create_interpol(9, 1.0, 0.4)),
+            (
+                InterpolCtoF(2, 9, [1, 1], [0, 0]),
+                create_interpol_c_to_f(9, k=2),
+            ),
+            (
+                InterpolCtoN(2, 9, [1, 1], [0, 0]),
+                create_interpol_c_to_n(9, k=2),
+            ),
+            (
+                InterpolFtoC(2, 9, [1, 1], [0, 0]),
+                create_interpol_f_to_c(9, k=2),
+            ),
+            (
+                InterpolNtoC(2, 9, [1, 1], [0, 0]),
+                create_interpol_n_to_c(9, k=2),
+            ),
+            (RobinBC(2, 9, 0.125, 1.0, 0.5),
+             create_robin_bc(9, 0.125, k=2, a=1.0, b=0.5)),
+            (
+                MixedBC(
+                    2, 9, 0.125, "Dirichlet", [1.0], "Neumann", [0.0]
+                ),
+                create_mixed_bc(
+                    9, 0.125, k=2, left="Dirichlet", coeffs_left=[1.0],
+                    right="Neumann", coeffs_right=[0.0],
+                ),
+            ),
+        )
+        for mole_operator, factory_operator in operators:
+            np.testing.assert_allclose(
+                mole_operator.to_scipy_sparse().toarray(),
+                factory_operator.matrix.toarray(),
+                rtol=0.0,
+                atol=1e-12,
+            )
+            assert mole_operator.shape() == factory_operator.matrix.shape
+            assert mole_operator.nnz() == factory_operator.matrix.nnz
+
+        periodic_gradient = Gradient(
+            k=2, m=8, dx=0.125, dc=[0, 0], nc=[0, 0]
+        )
+        assert periodic_gradient.shape() == (8, 8)
+        assert isinstance(periodic_gradient.getP(), list)
+        periodic_divergence = Divergence(
+            k=2, m=8, dx=0.125, dc=[0, 0], nc=[0, 0]
+        )
+        assert isinstance(periodic_divergence.getQ(), list)
+        assert Gradient(2, 4, 5, 0.25, 0.2).shape() == (49, 42)
+
+        mixed_boundary = {
+            "left": "Dirichlet", "coeffs_left": [1.0],
+            "right": "Neumann", "coeffs_right": [0.0],
+            "bottom": "Robin", "coeffs_bottom": [1.0, 0.5],
+            "top": "Dirichlet", "coeffs_top": [1.0],
+        }
+        multidimensional = (
+            (
+                Gradient(2, 5, 6, 0.2, 0.15),
+                create_gradient((5, 6), (0.2, 0.15)),
+            ),
+            (
+                Divergence(2, 5, 6, 0.2, 0.15),
+                create_divergence((5, 6), (0.2, 0.15)),
+            ),
+            (
+                Laplacian(2, 5, 6, 0.2, 0.15),
+                create_laplacian((5, 6), (0.2, 0.15)),
+            ),
+            (
+                Interpol(5, 6, 0.4, 0.6),
+                create_interpol((5, 6), (1.0, 1.0), (0.4, 0.6)),
+            ),
+            (
+                InterpolCtoF(2, 5, 6, [1, 1, 1, 1], [0, 0, 0, 0]),
+                create_interpol_c_to_f((5, 6), k=2),
+            ),
+            (
+                InterpolCtoN(2, 5, 6, [1, 1, 1, 1], [0, 0, 0, 0]),
+                create_interpol_c_to_n((5, 6), k=2),
+            ),
+            (
+                InterpolFtoC(2, 5, 6, [1, 1, 1, 1], [0, 0, 0, 0]),
+                create_interpol_f_to_c((5, 6), k=2),
+            ),
+            (
+                InterpolNtoC(2, 5, 6, [1, 1, 1, 1], [0, 0, 0, 0]),
+                create_interpol_n_to_c((5, 6), k=2),
+            ),
+            (
+                RobinBC(2, 5, 0.2, 6, 0.15, 1.0, 0.5),
+                create_robin_bc((5, 6), (0.2, 0.15), k=2, a=1.0, b=0.5),
+            ),
+            (
+                MixedBC(
+                    2, 5, 0.2, 6, 0.15,
+                    "Dirichlet", [1.0], "Neumann", [0.0],
+                    "Robin", [1.0, 0.5], "Dirichlet", [1.0],
+                ),
+                create_mixed_bc(
+                    (5, 6), (0.2, 0.15), k=2, **mixed_boundary
+                ),
+            ),
+        )
+        for mole_operator, factory_operator in multidimensional:
+            np.testing.assert_allclose(
+                mole_operator.to_scipy_sparse().toarray(),
+                factory_operator.matrix.toarray(),
+                rtol=0.0,
+                atol=1e-12,
+            )
+    finally:
+        use_backend(previous_backend)
 
 
 def test_add_scalar_bc_1d_replaces_boundary_equations():
@@ -207,7 +346,11 @@ def test_add_scalar_bc_3d_applies_boundary_values_on_each_face():
      (0.0, 0.5, 1.0, 0.0, 0.25, 1.0), 2),
 ])
 def test_add_scalar_bc_public_api_matches_selected_backends(
-    dimensions, spacings, dc, nc, k
+    dimensions: Tuple[int, ...],
+    spacings: Tuple[float, ...],
+    dc: Tuple[float, ...],
+    nc: Tuple[float, ...],
+    k: int,
 ):
     _load_native_backend()
     active_axes = tuple(
@@ -266,7 +409,10 @@ def test_add_scalar_bc_public_api_matches_selected_backends(
      (1.0, 0.0, 0.0, 1.0, 1.0, 0.0), (0.0, 0.5, 1.0, 0.0, 0.25, 1.0)),
 ])
 def test_scalar_bc_lhs_and_rhs_helpers_match_native(
-    dimensions, spacings, dc, nc
+    dimensions: Tuple[int, ...],
+    spacings: Tuple[float, ...],
+    dc: Tuple[float, ...],
+    nc: Tuple[float, ...],
 ):
     _load_native_backend()
     axis_count = len(dimensions)
@@ -359,6 +505,8 @@ def test_mole_shaped_add_scalar_bc_overloads_mutate_inputs(backend, axis_count):
             np.full(42, 5.0), np.full(42, 6.0),
         ]
 
+    dimension_values = list(dimensions)
+    spacing_values = list(spacings)
     active_axes = tuple(
         np.any(conditions.dc[2 * axis:2 * axis + 2])
         or np.any(conditions.nc[2 * axis:2 * axis + 2])
@@ -382,13 +530,20 @@ def test_mole_shaped_add_scalar_bc_overloads_mutate_inputs(backend, axis_count):
     matrix = original_matrix.copy()
     rhs = original_rhs.copy()
     if axis_count == 1:
-        args = (matrix, rhs, 2, dimensions[0], spacings[0], conditions)
+        args = (
+            matrix, rhs, 2, dimension_values[0], spacing_values[0], conditions
+        )
     elif axis_count == 2:
-        args = (matrix, rhs, 2, *dimensions[:1], spacings[0], dimensions[1],
-                spacings[1], conditions)
+        args = (
+            matrix, rhs, 2, dimension_values[0], spacing_values[0],
+            dimension_values[1], spacing_values[1], conditions,
+        )
     else:
-        args = (matrix, rhs, 2, dimensions[0], spacings[0], dimensions[1],
-                spacings[1], dimensions[2], spacings[2], conditions)
+        args = (
+            matrix, rhs, 2, dimension_values[0], spacing_values[0],
+            dimension_values[1], spacing_values[1],
+            dimension_values[2], spacing_values[2], conditions,
+        )
 
     original_backend = get_backend()
     try:
@@ -468,24 +623,28 @@ def test_mole_shaped_multidimensional_lhs_rhs_overloads(backend, axis_count):
         dimensions, spacings = (4, 5, 6), (0.25, 0.2, 0.125)
         dc = np.asarray([1.0, 0.0, 0.0, 1.0, 1.0, 0.0])
         nc = np.asarray([0.0, 0.5, 1.0, 0.0, 0.25, 1.0])
+    dimension_values = list(dimensions)
+    spacing_values = list(spacings)
     conditions = ScalarBoundaryConditions(dc=dc, nc=nc, values=())
     expected_matrices = create_scalar_bc_lhs(dimensions, spacings, conditions)
     output_matrices = [sparse.csc_matrix((0, 0)) for _ in expected_matrices]
     if axis_count == 2:
         lhs_args = (
-            2, dimensions[0], spacings[0], dimensions[1], spacings[1], dc, nc,
+            2, dimension_values[0], spacing_values[0],
+            dimension_values[1], spacing_values[1], dc, nc,
             *output_matrices,
         )
     else:
         lhs_args = (
-            2, dimensions[0], spacings[0], dimensions[1], spacings[1],
-            dimensions[2], spacings[2], dc, nc, *output_matrices,
+            2, dimension_values[0], spacing_values[0],
+            dimension_values[1], spacing_values[1],
+            dimension_values[2], spacing_values[2], dc, nc, *output_matrices,
         )
 
     rows = tuple(np.unique(matrix.nonzero()[0]) for matrix in expected_matrices)
     values = [np.full(index.size, side + 1.0) for side, index in enumerate(rows)]
     boundary_conditions = ScalarBoundaryConditions(dc=dc, nc=nc, values=values)
-    system_size = expected_matrices[0].shape[0]
+    system_size = expected_matrices[0].get_shape()[0]
     rhs = np.zeros(system_size)
     expected_rhs = apply_scalar_bc_rhs(rhs, boundary_conditions, rows)
     actual_rhs = rhs.copy()
@@ -782,13 +941,13 @@ def test_laplacian_and_interpolation_expose_only_mole_cpp_parameters():
         assert "boundary" not in inspect.signature(callable_).parameters
 
     with pytest.raises(TypeError):
-        create_laplacian(8, 0.125, boundary="periodic")
+        _call_with_unsupported_boundary(create_laplacian)
     with pytest.raises(TypeError):
-        MimeticLaplacian(8, 0.125, boundary="periodic")
+        _call_with_unsupported_boundary(MimeticLaplacian)
     with pytest.raises(TypeError):
-        create_interpol(8, 0.125, boundary="periodic")
+        _call_with_unsupported_boundary(create_interpol)
     with pytest.raises(TypeError):
-        MimeticInterpol(8, 0.125, boundary="periodic")
+        _call_with_unsupported_boundary(MimeticInterpol)
 
 
 @pytest.mark.parametrize(
@@ -870,12 +1029,12 @@ def test_ctof_multidimensional_shapes_and_boundary_modes():
     assert periodic_2d.matrix.shape == (2 * 9 * 10, 2 * 9 * 10)
     assert mixed_3d.matrix.shape == (3069, 3564)
     np.testing.assert_allclose(
-        nonperiodic_2d.matrix @ np.ones(nonperiodic_2d.matrix.shape[1]),
-        np.ones(nonperiodic_2d.matrix.shape[0]),
+        nonperiodic_2d.matrix @ np.ones(nonperiodic_2d.matrix.get_shape()[1]),
+        np.ones(nonperiodic_2d.matrix.get_shape()[0]),
     )
     np.testing.assert_allclose(
-        mixed_3d.matrix @ np.ones(mixed_3d.matrix.shape[1]),
-        np.ones(mixed_3d.matrix.shape[0]),
+        mixed_3d.matrix @ np.ones(mixed_3d.matrix.get_shape()[1]),
+        np.ones(mixed_3d.matrix.get_shape()[0]),
     )
 
 
@@ -959,8 +1118,8 @@ def test_cton_multidimensional_shapes_and_boundary_modes():
     assert mixed_3d.matrix.shape == (1089, 1188)
     for operator in (nonperiodic_2d, periodic_2d, mixed_3d):
         np.testing.assert_allclose(
-            operator @ np.ones(operator.matrix.shape[1]),
-            np.ones(operator.matrix.shape[0]),
+            operator @ np.ones(operator.matrix.get_shape()[1]),
+            np.ones(operator.matrix.get_shape()[0]),
         )
 
 
@@ -1056,10 +1215,10 @@ def test_ftoc_multidimensional_shapes_and_boundary_modes():
     for operator, nonzero_rows in zip(
         (nonperiodic_2d, periodic_2d, mixed_3d), expected_nonzero_rows
     ):
-        row_sums = operator.matrix @ np.ones(operator.matrix.shape[1])
+        row_sums = operator.matrix @ np.ones(operator.matrix.get_shape()[1])
         expected_sums = (
             (0.0, 1.0)
-            if nonzero_rows < operator.matrix.shape[0]
+            if nonzero_rows < operator.matrix.get_shape()[0]
             else (1.0,)
         )
         np.testing.assert_allclose(np.unique(row_sums), expected_sums)
@@ -1125,8 +1284,8 @@ def test_ntoc_periodic_multidimensional_shapes_and_factory():
     assert mixed_3d.matrix.shape == (1188, 1089)
     for operator in (periodic, nonperiodic_2d, mixed_3d):
         np.testing.assert_allclose(
-            operator @ np.ones(operator.matrix.shape[1]),
-            np.ones(operator.matrix.shape[0]),
+            operator @ np.ones(operator.matrix.get_shape()[1]),
+            np.ones(operator.matrix.get_shape()[0]),
         )
 
     previous_backend = get_backend()

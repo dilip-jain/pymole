@@ -1,6 +1,6 @@
 """C++ implementation bindings for mimetic operators."""
 
-from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 from scipy import sparse
@@ -53,6 +53,47 @@ def _native_grid_operator(
     spacings: GridSpacings
 ) -> Any:
     return operator(k, *dimensions, *spacings)
+
+
+def _native_derivative_operator(
+    operator: Any,
+    k: int,
+    dimensions: GridDimensions,
+    spacings: GridSpacings,
+    dc: Sequence[int],
+    nc: Sequence[int],
+) -> Any:
+    if len(dimensions) == 1:
+        return operator(k, dimensions[0], spacings[0], dc, nc)
+    if len(dimensions) == 2:
+        return operator(
+            k, dimensions[0], dimensions[1], spacings[0], spacings[1], dc, nc
+        )
+    return operator(
+        k,
+        dimensions[0],
+        dimensions[1],
+        dimensions[2],
+        spacings[0],
+        spacings[1],
+        spacings[2],
+        dc,
+        nc,
+    )
+
+
+def _native_directional_interpolator(
+    operator: Any,
+    k: int,
+    dimensions: GridDimensions,
+    dc: Sequence[int],
+    nc: Sequence[int],
+) -> Any:
+    if len(dimensions) == 1:
+        return operator(k, dimensions[0], dc, nc)
+    if len(dimensions) == 2:
+        return operator(k, dimensions[0], dimensions[1], dc, nc)
+    return operator(k, dimensions[0], dimensions[1], dimensions[2], dc, nc)
 
 
 def _resolve_axis_coefficients(boundary, dimensions, dc, nc):
@@ -173,10 +214,16 @@ def create_scalar_bc_lhs(
     """Create side-specific scalar boundary matrices using native MOLE."""
     dimensions, spacings = _normalize_grid(n, h)
     dc, nc = _boundary_coefficients(conditions, len(dimensions))
-    matrices = _operators.create_scalar_bc_lhs(
-        conditions.k, dimensions, spacings, dc.tolist(), nc.tolist()
+    matrices = cast(
+        Sequence[Any],
+        _operators.create_scalar_bc_lhs(
+            conditions.k, dimensions, spacings, dc.tolist(), nc.tolist()
+        ),
     )
-    return tuple(sparse.csc_matrix(matrix) for matrix in matrices)
+    return tuple(
+        sparse.csc_matrix(matrix)
+        for matrix in matrices  # pylint: disable=not-an-iterable
+    )
 
 
 def apply_scalar_bc_rhs(rhs, conditions: ScalarBoundaryConditions, side_rows):
@@ -256,8 +303,8 @@ class MimeticGradient(MimeticOperator):
         )
         self.boundary = boundary if dc is None else modes
         self.k = k
-        self._cpp_operator = _operators.Gradient(
-            k, *dimensions, *spacings, dc_values, nc_values
+        self._cpp_operator = _native_derivative_operator(
+            _operators.Gradient, k, dimensions, spacings, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -321,8 +368,8 @@ class MimeticDivergence(MimeticOperator):
         )
         self.boundary = boundary if dc is None else modes
         self.k = k
-        self._cpp_operator = _operators.Divergence(
-            k, *dimensions, *spacings, dc_values, nc_values
+        self._cpp_operator = _native_derivative_operator(
+            _operators.Divergence, k, dimensions, spacings, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -462,8 +509,8 @@ class MimeticInterpolCtoF(MimeticOperator):
         self._dimensions = dimensions
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
-        self._cpp_operator = _operators.InterpolCtoF(
-            self.k, *dimensions, dc_values, nc_values
+        self._cpp_operator = _native_directional_interpolator(
+            _operators.InterpolCtoF, self.k, dimensions, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -497,8 +544,8 @@ class MimeticInterpolCtoN(MimeticOperator):
         self._dimensions = dimensions
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
-        self._cpp_operator = _operators.InterpolCtoN(
-            self.k, *dimensions, dc_values, nc_values
+        self._cpp_operator = _native_directional_interpolator(
+            _operators.InterpolCtoN, self.k, dimensions, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -532,8 +579,8 @@ class MimeticInterpolFtoC(MimeticOperator):
         self._dimensions = dimensions
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
-        self._cpp_operator = _operators.InterpolFtoC(
-            self.k, *dimensions, dc_values, nc_values
+        self._cpp_operator = _native_directional_interpolator(
+            _operators.InterpolFtoC, self.k, dimensions, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -567,8 +614,8 @@ class MimeticInterpolNtoC(MimeticOperator):
         self._dimensions = dimensions
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
-        self._cpp_operator = _operators.InterpolNtoC(
-            self.k, *dimensions, dc_values, nc_values
+        self._cpp_operator = _native_directional_interpolator(
+            _operators.InterpolNtoC, self.k, dimensions, dc_values, nc_values
         )
 
     def _build_matrix(self) -> sparse.csc_matrix:
@@ -619,21 +666,26 @@ class MimeticRobinBC(MimeticOperator):
         self.a = a
         self.b = b
 
+        dimension_values = list(dimensions)
+        spacing_values = list(spacings)
         # Create appropriate C++ operator based on dimensions
         if len(dimensions) == 1:
-            self._cpp_operator = _operators.RobinBC(k, dimensions[0], spacings[0], a, b)
+            self._cpp_operator = _operators.RobinBC(
+                k, dimension_values[0], spacing_values[0], a, b
+            )
         elif len(dimensions) == 2:
                 # 2D
             self._cpp_operator = _operators.RobinBC(
-                k, dimensions[0], spacings[0], dimensions[1], spacings[1], a, b
+                k, dimension_values[0], spacing_values[0],
+                dimension_values[1], spacing_values[1], a, b
             )
         elif len(dimensions) == 3:
                 # 3D
             self._cpp_operator = _operators.RobinBC(
                 k,
-                dimensions[0], spacings[0],
-                dimensions[1], spacings[1],
-                dimensions[2], spacings[2],
+                dimension_values[0], spacing_values[0],
+                dimension_values[1], spacing_values[1],
+                dimension_values[2], spacing_values[2],
                 a, b,
             )
         else:
@@ -696,16 +748,19 @@ class MimeticMixedBC(MimeticOperator):
         self.k = k
         self._bc_dict = bc_dict
 
+        dimension_values = list(dimensions)
+        spacing_values = list(spacings)
         # Create appropriate C++ operator based on dimensions
         if len(dimensions) == 1:
             self._cpp_operator = _operators.MixedBC(
-                k, dimensions[0], spacings[0],
+                k, dimension_values[0], spacing_values[0],
                 _boundary_type(bc_dict, "left"), bc_dict.get('coeffs_left', []),
                 _boundary_type(bc_dict, "right"), bc_dict.get('coeffs_right', [])
             )
         elif len(dimensions) == 2:
             self._cpp_operator = _operators.MixedBC(
-                k, dimensions[0], spacings[0], dimensions[1], spacings[1],
+                k, dimension_values[0], spacing_values[0],
+                dimension_values[1], spacing_values[1],
                 _boundary_type(bc_dict, "left"), bc_dict.get('coeffs_left', []),
                 _boundary_type(bc_dict, "right"), bc_dict.get('coeffs_right', []),
                 _boundary_type(bc_dict, "bottom"), bc_dict.get('coeffs_bottom', []),
@@ -714,9 +769,9 @@ class MimeticMixedBC(MimeticOperator):
         elif len(dimensions) == 3:
             self._cpp_operator = _operators.MixedBC(
                 k,
-                dimensions[0], spacings[0],
-                dimensions[1], spacings[1],
-                dimensions[2], spacings[2],
+                dimension_values[0], spacing_values[0],
+                dimension_values[1], spacing_values[1],
+                dimension_values[2], spacing_values[2],
                 _boundary_type(bc_dict, "left"), bc_dict.get('coeffs_left', []),
                 _boundary_type(bc_dict, "right"), bc_dict.get('coeffs_right', []),
                 _boundary_type(bc_dict, "bottom"), bc_dict.get('coeffs_bottom', []),
