@@ -13,6 +13,7 @@ from pymole import (
     create_interpol,
     create_interpol_c_to_f,
     create_interpol_c_to_n,
+    create_interpol_f_to_c,
     create_robin_bc,
     create_mixed_bc,
     add_scalar_bc,
@@ -33,6 +34,7 @@ from pymole.pure.operators import (
     MimeticInterpol,
     MimeticInterpolCtoF,
     MimeticInterpolCtoN,
+    MimeticInterpolFtoC,
     MimeticRobinBC as PureMimeticRobinBC,
     MimeticMixedBC as PureMimeticMixedBC,
 )
@@ -979,6 +981,106 @@ def test_cton_factory_and_validation():
         use_backend(previous_backend)
 
 
+@pytest.mark.parametrize(
+    ("k", "m", "first_row", "interior_row", "interior_values"),
+    [
+        (2, 5, (0.5,), 1, (0.5, 0.5)),
+        (4, 9, (35 / 128, 140 / 128, -70 / 128, 28 / 128, -5 / 128),
+         2, (-8 / 128, 72 / 128, 72 / 128, -8 / 128)),
+        (6, 13, (231 / 1024, 1386 / 1024, -1155 / 1024, 924 / 1024,
+                 -495 / 1024, 154 / 1024, -21 / 1024),
+         3, (12 / 1024, -100 / 1024, 600 / 1024, 600 / 1024,
+             -100 / 1024, 12 / 1024)),
+        (8, 17, (6435 / 32768, 6435 / 4096, -15015 / 8192, 9009 / 4096,
+                 -32175 / 16384, 5005 / 4096, -4095 / 8192, 495 / 4096,
+                 -429 / 32768),
+         4, (-5 / 2048, 49 / 2048, -245 / 2048, 1225 / 2048,
+             1225 / 2048, -245 / 2048, 49 / 2048, -5 / 2048)),
+    ],
+)
+def test_ftoc_nonperiodic_1d_matches_pinned_mole_rows(
+    k, m, first_row, interior_row, interior_values
+):
+    """Check face-to-center stencils from pinned MOLE C++."""
+    operator = MimeticInterpolFtoC(m, k=k)
+    matrix = operator.matrix.toarray()
+    assert matrix.shape == (m + 2, m + 1)
+    np.testing.assert_allclose(matrix[0, 0], 1.0)
+    np.testing.assert_allclose(matrix[1, :len(first_row)], first_row)
+    np.testing.assert_allclose(
+        matrix[interior_row, interior_row - (len(interior_values) // 2) +
+               np.arange(len(interior_values))],
+        interior_values,
+    )
+    np.testing.assert_allclose(matrix[m + 1, m], 1.0)
+    np.testing.assert_allclose(operator @ np.ones(m + 1), np.ones(m + 2))
+
+
+@pytest.mark.parametrize(
+    ("k", "m", "expected_entries"),
+    [
+        (2, 5, ((0, 0, 0.5), (0, 1, 0.5))),
+        (4, 9, ((0, 0, 72 / 128), (0, 1, 72 / 128),
+                (0, 2, -8 / 128), (0, 8, -8 / 128))),
+        (6, 13, ((0, 0, 600 / 1024), (0, 1, 600 / 1024),
+                 (0, 2, -100 / 1024), (0, 3, 12 / 1024),
+                 (0, 11, 12 / 1024), (0, 12, -100 / 1024))),
+        (8, 17, ((0, 0, 1225 / 2048), (0, 1, 1225 / 2048),
+                 (0, 2, -245 / 2048), (0, 3, 49 / 2048),
+                 (0, 4, -5 / 2048), (0, 14, -5 / 2048),
+                 (0, 15, 49 / 2048), (0, 16, -245 / 2048))),
+    ],
+)
+def test_ftoc_periodic_1d_matches_pinned_mole_rows(k, m, expected_entries):
+    """Check periodic face-to-center coefficients from pinned MOLE C++."""
+    operator = MimeticInterpolFtoC(m, boundary="periodic", k=k)
+    assert operator.matrix.shape == (m, m)
+    for row, column, expected in expected_entries:
+        assert operator.matrix[row, column] == pytest.approx(expected)
+    np.testing.assert_allclose(operator @ np.ones(m), np.ones(m))
+
+
+def test_ftoc_multidimensional_shapes_and_boundary_modes():
+    """Check multidimensional FtoC blocks and preservation of constant fields."""
+    nonperiodic_2d = MimeticInterpolFtoC((9, 10), k=2)
+    periodic_2d = MimeticInterpolFtoC((9, 10), boundary="periodic", k=2)
+    mixed_3d = MimeticInterpolFtoC(
+        (9, 10, 11), boundary=("periodic", "nonperiodic", "periodic"), k=2
+    )
+    assert nonperiodic_2d.matrix.shape == (264, 199)
+    assert periodic_2d.matrix.shape == (180, 180)
+    assert mixed_3d.matrix.shape == (3564, 3069)
+    expected_nonzero_rows = (218, 180, 3168)
+    for operator, nonzero_rows in zip(
+        (nonperiodic_2d, periodic_2d, mixed_3d), expected_nonzero_rows
+    ):
+        row_sums = operator.matrix @ np.ones(operator.matrix.shape[1])
+        expected_sums = (
+            (0.0, 1.0)
+            if nonzero_rows < operator.matrix.shape[0]
+            else (1.0,)
+        )
+        np.testing.assert_allclose(np.unique(row_sums), expected_sums)
+        assert np.count_nonzero(row_sums) == nonzero_rows
+
+
+def test_ftoc_factory_and_validation():
+    """Check the public FtoC API and shared MOLE input constraints."""
+    previous_backend = get_backend()
+    use_backend("python")
+    try:
+        assert inspect.signature(create_interpol_f_to_c) == inspect.signature(
+            MimeticInterpolFtoC
+        )
+        assert create_interpol_f_to_c(9, k=2).matrix.shape == (11, 10)
+        with pytest.raises(ValueError, match="m > 2\\*k"):
+            MimeticInterpolFtoC(4, k=2)
+        with pytest.raises(ValueError, match="supports k"):
+            MimeticInterpolFtoC(9, k=3)
+    finally:
+        use_backend(previous_backend)
+
+
 def test_public_factories_cpp_matrix_parity():
     """Test: Native matrix parity for C++ backend."""
     _load_native_backend()
@@ -1011,6 +1113,9 @@ def test_public_factories_cpp_matrix_parity():
         ), (
             create_interpol_c_to_n(9, k=2),
             MimeticInterpolCtoN(9, k=2)
+        ), (
+            create_interpol_f_to_c(9, k=2),
+            MimeticInterpolFtoC(9, k=2)
         ), (
             create_robin_bc(9, 0.125, k=2, a=2.0, b=0.5),
             PureMimeticRobinBC(9, 0.125, k=2, a=2.0, b=0.5)

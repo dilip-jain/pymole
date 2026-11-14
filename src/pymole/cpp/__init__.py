@@ -109,6 +109,7 @@ Laplacian = _operators.Laplacian
 Interpol = _operators.Interpol
 InterpolCtoF = _operators.InterpolCtoF
 InterpolCtoN = _operators.InterpolCtoN
+InterpolFtoC = _operators.InterpolFtoC
 RobinBC = _operators.RobinBC
 MixedBC = _operators.MixedBC
 
@@ -128,6 +129,7 @@ __all__ = [
     'Interpol',
     'InterpolCtoF',
     'InterpolCtoN',
+    'InterpolFtoC',
     'RobinBC',
     'MixedBC',
     'MimeticGradient',
@@ -136,6 +138,7 @@ __all__ = [
     'MimeticInterpol',
     'MimeticInterpolCtoF',
     'MimeticInterpolCtoN',
+    'MimeticInterpolFtoC',
     'MimeticRobinBC',
     'MimeticMixedBC',
 ]
@@ -492,6 +495,41 @@ class MimeticInterpolCtoN(MimeticOperator):
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
         self._cpp_operator = _operators.InterpolCtoN(
+            self.k, *dimensions, dc_values, nc_values
+        )
+
+    def _build_matrix(self) -> sparse.csc_matrix:
+        return _native_matrix(self._cpp_operator)
+
+    @property
+    def matrix(self) -> sparse.csc_matrix:
+        if self._matrix is None:
+            self._matrix = self._build_matrix()
+        return self._matrix
+
+    def __matmul__(self, x: np.ndarray) -> np.ndarray:
+        return _native_apply(self._cpp_operator, x)
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        return self @ x
+
+
+class MimeticInterpolFtoC(MimeticOperator):
+    """MOLE face-to-center interpolation operator using the C++ backend."""
+
+    def __init__(self, n: GridSize, boundary: AxisBoundaries = 'nonperiodic',
+                 k: int = 2, dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        self._cpp_operator = _operators.InterpolFtoC(
             self.k, *dimensions, dc_values, nc_values
         )
 

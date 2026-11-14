@@ -654,6 +654,140 @@ class MimeticInterpolCtoN(_PureMimeticOperator):
         return self._matrix
 
 
+_MOLE_FTOC_NONPERIODIC = {
+    2: (1, 0, (-1, 0), (0.5, 0.5), (), ()),
+    4: (
+        2, 1, (-2, -1, 0, 1), (-8 / 128, 72 / 128, 72 / 128, -8 / 128),
+        ((1, 0, (35 / 128, 140 / 128, -70 / 128, 28 / 128, -5 / 128)),),
+        ((0, -4, (-5 / 128, 28 / 128, -70 / 128, 140 / 128, 35 / 128)),),
+    ),
+    6: (
+        3, 2, (-3, -2, -1, 0, 1, 2),
+        (12 / 1024, -100 / 1024, 600 / 1024, 600 / 1024,
+         -100 / 1024, 12 / 1024),
+        (
+            (1, 0, (231 / 1024, 1386 / 1024, -1155 / 1024, 924 / 1024,
+                    -495 / 1024, 154 / 1024, -21 / 1024)),
+            (2, 0, (-21 / 1024, 378 / 1024, 945 / 1024, -420 / 1024,
+                    189 / 1024, -54 / 1024, 7 / 1024)),
+        ),
+        (
+            (-1, -6, (7 / 1024, -54 / 1024, 189 / 1024, -420 / 1024,
+                      945 / 1024, 378 / 1024, -21 / 1024)),
+            (0, -6, (-21 / 1024, 154 / 1024, -495 / 1024, 924 / 1024,
+                     -1155 / 1024, 1386 / 1024, 231 / 1024)),
+        ),
+    ),
+    8: (
+        4, 3, (-4, -3, -2, -1, 0, 1, 2, 3),
+        (-5 / 2048, 49 / 2048, -245 / 2048, 1225 / 2048,
+         1225 / 2048, -245 / 2048, 49 / 2048, -5 / 2048),
+        (
+            (1, 0, (6435 / 32768, 6435 / 4096, -15015 / 8192,
+                    9009 / 4096, -32175 / 16384, 5005 / 4096,
+                    -4095 / 8192, 495 / 4096, -429 / 32768)),
+            (2, 0, (-429 / 32768, 1287 / 4096, 9009 / 8192,
+                    -3003 / 4096, 9009 / 16384, -1287 / 4096,
+                    1001 / 8192, -117 / 4096, 99 / 32768)),
+            (3, 0, (99 / 32768, -165 / 4096, 3465 / 8192,
+                    3465 / 4096, -5775 / 16384, 693 / 4096,
+                    -495 / 8192, 55 / 4096, -45 / 32768)),
+        ),
+        (
+            (-2, -8, (-45 / 32768, 55 / 4096, -495 / 8192,
+                      693 / 4096, -5775 / 16384, 3465 / 4096,
+                      3465 / 8192, -165 / 4096, 99 / 32768)),
+            (-1, -8, (99 / 32768, -117 / 4096, 1001 / 8192,
+                      -1287 / 4096, 9009 / 16384, -3003 / 4096,
+                      9009 / 8192, 1287 / 4096, -429 / 32768)),
+            (0, -8, (-429 / 32768, 495 / 4096, -4095 / 8192,
+                     5005 / 4096, -32175 / 16384, 9009 / 4096,
+                     -15015 / 8192, 6435 / 4096, 6435 / 32768)),
+        ),
+    ),
+}
+
+
+def _build_mole_ftoc_axis(size: int, k: int, periodic: bool) -> csc_matrix:
+    if periodic:
+        matrix = sparse.lil_matrix((size, size), dtype=float)
+        rows = np.arange(size)
+        for offset, coefficient in _MOLE_CENTER_INTERPOLATOR_PERIODIC[k]:
+            matrix[rows, (rows + offset) % size] = coefficient
+        return matrix.tocsc()
+
+    matrix = sparse.lil_matrix((size + 2, size + 1), dtype=float)
+    matrix[0, 0] = 1.0
+    matrix[size + 1, size] = 1.0
+    start, end_from_size, offsets, values, left_rows, right_rows = (
+        _MOLE_FTOC_NONPERIODIC[k]
+    )
+    for row, col_start, coefficients in left_rows:
+        matrix[row, col_start:col_start + len(coefficients)] = coefficients
+    for row_offset, col_offset, coefficients in right_rows:
+        row = size + row_offset
+        col_start = size + col_offset
+        matrix[row, col_start:col_start + len(coefficients)] = coefficients
+    for row in range(start, size + 1 - end_from_size):
+        columns = row + np.asarray(offsets)
+        matrix[row, columns] = values
+    return matrix.tocsc()
+
+
+class MimeticInterpolFtoC(_PureMimeticOperator):
+    """MOLE face-to-center interpolation operator for 1D, 2D, and 3D grids."""
+
+    def __init__(self, n: Union[int, Tuple[int, ...]],
+                 boundary: AxisBoundaries = "nonperiodic", k: int = 2,
+                 dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        axes = []
+        selectors = []
+        for axis, size in enumerate(dimensions):
+            periodic = (
+                not any(dc_values[2 * axis:2 * axis + 2])
+                and not any(nc_values[2 * axis:2 * axis + 2])
+            )
+            axes.append(_build_mole_ftoc_axis(size, self.k, periodic))
+            if periodic:
+                selectors.append(csc_matrix(sparse.eye(size, format="csc")))
+            else:
+                selectors.append(_trimmed_identity_cols(size))
+
+        if len(dimensions) == 1:
+            self._matrix = axes[0]
+        elif len(dimensions) == 2:
+            self._matrix = csc_matrix(sparse.block_diag(
+                (sparse.kron(selectors[1], axes[0], format="csc"),
+                 sparse.kron(axes[1], selectors[0], format="csc")),
+                format="csc",
+            ))
+        else:
+            self._matrix = csc_matrix(sparse.block_diag(
+                (
+                    sparse.kron(sparse.kron(selectors[2], selectors[1], format="csc"),
+                                axes[0], format="csc"),
+                    sparse.kron(sparse.kron(selectors[2], axes[1], format="csc"),
+                                selectors[0], format="csc"),
+                    sparse.kron(sparse.kron(axes[2], selectors[1], format="csc"),
+                                selectors[0], format="csc"),
+                ),
+                format="csc",
+            ))
+
+    def _build_matrix(self) -> csc_matrix:
+        return self._matrix
+
+
 class MimeticInterpol(_PureMimeticOperator):
     """MOLE interpolation from nodal values to staggered values."""
 

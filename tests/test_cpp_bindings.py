@@ -15,6 +15,7 @@ from pymole.pure.operators import (
     MimeticInterpol as PureInterpol,
     MimeticInterpolCtoF as PureInterpolCtoF,
     MimeticInterpolCtoN as PureInterpolCtoN,
+    MimeticInterpolFtoC as PureInterpolFtoC,
 )
 
 
@@ -261,6 +262,76 @@ def test_cton_cpp_periodic_and_multidimensional_shapes():
                                    rtol=0, atol=1e-14)
         np.testing.assert_allclose(
             native_grid @ np.ones(expected_shape[1]),
+            pure_grid @ np.ones(expected_shape[1]),
+            rtol=0,
+            atol=1e-14,
+        )
+
+
+@pytest.mark.parametrize(
+    ("k", "m", "expected"),
+    [
+        (2, 5, (0.5,)),
+        (4, 9, (35 / 128, 140 / 128, -70 / 128, 28 / 128, -5 / 128)),
+        (6, 13, (231 / 1024, 1386 / 1024, -1155 / 1024, 924 / 1024,
+                 -495 / 1024, 154 / 1024, -21 / 1024)),
+        (8, 17, (6435 / 32768, 6435 / 4096, -15015 / 8192, 9009 / 4096,
+                 -32175 / 16384, 5005 / 4096, -4095 / 8192, 495 / 4096,
+                 -429 / 32768)),
+    ],
+)
+def test_ftoc_cpp_binding_matches_pinned_reference_and_python(k, m, expected):
+    """Validate native FtoC against pinned MOLE coefficients and pure Python."""
+    native = _native_backend()
+    native_operator = native.MimeticInterpolFtoC(m, k=k)
+    pure_operator = PureInterpolFtoC(m, k=k)
+
+    assert native_operator.matrix.shape == (m + 2, m + 1)
+    np.testing.assert_allclose(
+        native_operator.matrix.toarray(),
+        pure_operator.matrix.toarray(),
+        rtol=0,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        native_operator.matrix[1, :len(expected)].toarray()[0],
+        expected,
+        rtol=0,
+        atol=1e-14,
+    )
+    raw_operator = native.InterpolFtoC(k, m, [1, 1], [0, 0])
+    assert raw_operator.shape() == (m + 2, m + 1)
+    np.testing.assert_allclose(
+        raw_operator.to_scipy_sparse().toarray(),
+        pure_operator.matrix.toarray(),
+        rtol=0,
+        atol=1e-14,
+    )
+
+
+def test_ftoc_cpp_periodic_and_multidimensional_shapes():
+    """Check native FtoC periodic behavior and multidimensional assembly."""
+    native = _native_backend()
+    periodic = native.MimeticInterpolFtoC(9, boundary="periodic", k=4)
+    assert periodic.matrix.shape == (9, 9)
+    assert periodic.matrix[0, 0] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 1] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 2] == pytest.approx(-8 / 128)
+    assert periodic.matrix[0, 8] == pytest.approx(-8 / 128)
+
+    for dimensions, boundary, expected_shape in (
+        ((9, 10), "nonperiodic", (264, 199)),
+        ((9, 10), "periodic", (180, 180)),
+        ((9, 10, 11), ("periodic", "nonperiodic", "periodic"), (3564, 3069)),
+    ):
+        native_grid = native.MimeticInterpolFtoC(dimensions, boundary=boundary, k=2)
+        pure_grid = PureInterpolFtoC(dimensions, boundary=boundary, k=2)
+        assert native_grid.matrix.shape == expected_shape
+        difference = (native_grid.matrix - pure_grid.matrix).tocsc()
+        np.testing.assert_allclose(difference.data, np.zeros_like(difference.data),
+                                   rtol=0, atol=1e-14)
+        np.testing.assert_allclose(
+            native_grid @ np.ones(expected_shape[1]),
             np.ones(expected_shape[0]),
             rtol=0,
             atol=1e-14,
@@ -279,6 +350,7 @@ def test_public_operator_signatures_match_python():
         "MimeticInterpol",
         "MimeticInterpolCtoF",
         "MimeticInterpolCtoN",
+        "MimeticInterpolFtoC",
         "MimeticRobinBC",
         "MimeticMixedBC",
     ):
