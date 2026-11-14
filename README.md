@@ -50,6 +50,9 @@ face_values = ctof @ np.ones(11)
 and periodic or non-periodic boundaries per axis. The grid sizes must satisfy
 MOLE's `m > 2*k` constraint. Unlike the other grid factories, it does not take
 grid spacing because this interpolation matrix is independent of spacing.
+Use `create_interpol_c_to_n` for the corresponding center-to-node operator;
+its multidimensional matrix is the tensor product of its one-dimensional
+operators.
 
 Apply scalar boundary conditions to a sparse operator and right-hand side with `add_scalar_bc`:
 

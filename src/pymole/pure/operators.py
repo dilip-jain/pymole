@@ -422,7 +422,7 @@ class MimeticLaplacian(_PureMimeticOperator):
         return csc_matrix(divergence.matrix @ gradient.matrix)
 
 
-_MOLE_CTOF_NONPERIODIC = {
+_MOLE_CENTER_INTERPOLATOR_NONPERIODIC = {
     2: (1, 0, (0, 1), (0.5, 0.5), (), ()),
     4: (
         2, 1, (-1, 0, 1, 2), (-7.0 / 112.0, 63.0 / 112.0,
@@ -483,7 +483,7 @@ _MOLE_CTOF_NONPERIODIC = {
     ),
 }
 
-_MOLE_CTOF_PERIODIC = {
+_MOLE_CENTER_INTERPOLATOR_PERIODIC = {
     2: ((0, 0.5), (1, 0.5)),
     4: ((0, 72.0 / 128.0), (1, 72.0 / 128.0),
         (2, -8.0 / 128.0), (-1, -8.0 / 128.0)),
@@ -498,14 +498,14 @@ _MOLE_CTOF_PERIODIC = {
 }
 
 
-def _normalize_interpol_ctof(n, boundary, k, dc, nc):
+def _normalize_center_interpolator(n, boundary, k, dc, nc):
     dimensions = (n,) if isinstance(n, (int, np.integer)) else tuple(n)
     if not 1 <= len(dimensions) <= 3:
-        raise ValueError("InterpolCtoF supports 1D, 2D, and 3D grids")
+        raise ValueError("Center interpolation supports 1D, 2D, and 3D grids")
     if any(not isinstance(size, (int, np.integer)) or size <= 0 for size in dimensions):
         raise ValueError("Grid dimensions must be positive integers")
     dimensions = tuple(int(size) for size in dimensions)
-    if not isinstance(k, (int, np.integer)) or int(k) not in _MOLE_CTOF_NONPERIODIC:
+    if not isinstance(k, (int, np.integer)) or int(k) not in _MOLE_CENTER_INTERPOLATOR_NONPERIODIC:
         raise ValueError("MOLE supports k in {2, 4, 6, 8}")
     k = int(k)
     if any(size <= 2 * k for size in dimensions):
@@ -540,11 +540,11 @@ def _normalize_interpol_ctof(n, boundary, k, dc, nc):
     return dimensions, dc_values, [0] * len(dc_values), modes
 
 
-def _build_mole_ctof_axis(size: int, k: int, periodic: bool) -> csc_matrix:
+def _build_mole_center_interpolator_axis(size: int, k: int, periodic: bool) -> csc_matrix:
     if periodic:
         matrix = sparse.lil_matrix((size, size), dtype=float)
         rows = np.arange(size)
-        for offset, coefficient in _MOLE_CTOF_PERIODIC[k]:
+        for offset, coefficient in _MOLE_CENTER_INTERPOLATOR_PERIODIC[k]:
             matrix[rows, (rows - offset) % size] = coefficient
         return matrix.tocsc()
 
@@ -552,7 +552,7 @@ def _build_mole_ctof_axis(size: int, k: int, periodic: bool) -> csc_matrix:
     matrix[0, 0] = 1.0
     matrix[size, size + 1] = 1.0
     start, end_from_size, offsets, values, left_rows, right_rows = (
-        _MOLE_CTOF_NONPERIODIC[k]
+        _MOLE_CENTER_INTERPOLATOR_NONPERIODIC[k]
     )
     for row, col_start, coefficients in left_rows:
         matrix[row, col_start:col_start + len(coefficients)] = coefficients
@@ -574,7 +574,7 @@ def _build_mole_ctof(dimensions: Tuple[int, ...], k: int, dc, nc) -> csc_matrix:
             not any(dc[2 * axis:2 * axis + 2])
             and not any(nc[2 * axis:2 * axis + 2])
         )
-        axes.append(_build_mole_ctof_axis(size, k, periodic))
+        axes.append(_build_mole_center_interpolator_axis(size, k, periodic))
         if periodic:
             selectors.append(csc_matrix(sparse.eye(size, format="csc")))
         else:
@@ -607,7 +607,7 @@ class MimeticInterpolCtoF(_PureMimeticOperator):
                  boundary: AxisBoundaries = "nonperiodic", k: int = 2,
                  dc: Optional[Sequence[int]] = None,
                  nc: Optional[Sequence[int]] = None):
-        dimensions, dc_values, nc_values, modes = _normalize_interpol_ctof(
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
             n, boundary, k, dc, nc
         )
         super().__init__(dimensions[0], 1.0)
@@ -617,6 +617,38 @@ class MimeticInterpolCtoF(_PureMimeticOperator):
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
         self._matrix = _build_mole_ctof(dimensions, self.k, dc_values, nc_values)
+
+    def _build_matrix(self) -> csc_matrix:
+        return self._matrix
+
+
+class MimeticInterpolCtoN(_PureMimeticOperator):
+    """MOLE center-to-node interpolation operator for 1D, 2D, and 3D grids."""
+
+    def __init__(self, n: Union[int, Tuple[int, ...]],
+                 boundary: AxisBoundaries = "nonperiodic", k: int = 2,
+                 dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        axes = []
+        for axis, size in enumerate(dimensions):
+            periodic = (
+                not any(dc_values[2 * axis:2 * axis + 2])
+                and not any(nc_values[2 * axis:2 * axis + 2])
+            )
+            axes.append(_build_mole_center_interpolator_axis(size, self.k, periodic))
+        matrix = axes[0]
+        for axis in axes[1:]:
+            matrix = sparse.kron(axis, matrix, format="csc")
+        self._matrix = csc_matrix(matrix)
 
     def _build_matrix(self) -> csc_matrix:
         return self._matrix

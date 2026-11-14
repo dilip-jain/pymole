@@ -15,7 +15,7 @@ except ImportError as exc:
     ) from exc
 
 from ..base import MimeticOperator
-from ..pure.operators import _normalize_interpol_ctof
+from ..pure.operators import _normalize_center_interpolator
 from ..pure.boundary import (
     BC1D,
     BC2D,
@@ -108,6 +108,7 @@ Divergence = _operators.Divergence
 Laplacian = _operators.Laplacian
 Interpol = _operators.Interpol
 InterpolCtoF = _operators.InterpolCtoF
+InterpolCtoN = _operators.InterpolCtoN
 RobinBC = _operators.RobinBC
 MixedBC = _operators.MixedBC
 
@@ -126,6 +127,7 @@ __all__ = [
     'Laplacian',
     'Interpol',
     'InterpolCtoF',
+    'InterpolCtoN',
     'RobinBC',
     'MixedBC',
     'MimeticGradient',
@@ -133,6 +135,7 @@ __all__ = [
     'MimeticLaplacian',
     'MimeticInterpol',
     'MimeticInterpolCtoF',
+    'MimeticInterpolCtoN',
     'MimeticRobinBC',
     'MimeticMixedBC',
 ]
@@ -444,7 +447,7 @@ class MimeticInterpolCtoF(MimeticOperator):
     def __init__(self, n: GridSize, boundary: AxisBoundaries = 'nonperiodic',
                  k: int = 2, dc: Optional[Sequence[int]] = None,
                  nc: Optional[Sequence[int]] = None):
-        dimensions, dc_values, nc_values, modes = _normalize_interpol_ctof(
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
             n, boundary, k, dc, nc
         )
         super().__init__(dimensions[0], 1.0)
@@ -454,6 +457,41 @@ class MimeticInterpolCtoF(MimeticOperator):
         self.k = int(k)
         self.boundary = boundary if dc is None else modes
         self._cpp_operator = _operators.InterpolCtoF(
+            self.k, *dimensions, dc_values, nc_values
+        )
+
+    def _build_matrix(self) -> sparse.csc_matrix:
+        return _native_matrix(self._cpp_operator)
+
+    @property
+    def matrix(self) -> sparse.csc_matrix:
+        if self._matrix is None:
+            self._matrix = self._build_matrix()
+        return self._matrix
+
+    def __matmul__(self, x: np.ndarray) -> np.ndarray:
+        return _native_apply(self._cpp_operator, x)
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        return self @ x
+
+
+class MimeticInterpolCtoN(MimeticOperator):
+    """MOLE center-to-node interpolation operator using the C++ backend."""
+
+    def __init__(self, n: GridSize, boundary: AxisBoundaries = 'nonperiodic',
+                 k: int = 2, dc: Optional[Sequence[int]] = None,
+                 nc: Optional[Sequence[int]] = None):
+        dimensions, dc_values, nc_values, modes = _normalize_center_interpolator(
+            n, boundary, k, dc, nc
+        )
+        super().__init__(dimensions[0], 1.0)
+        self.n = dimensions[0] if len(dimensions) == 1 else dimensions
+        self.h = 1.0
+        self._dimensions = dimensions
+        self.k = int(k)
+        self.boundary = boundary if dc is None else modes
+        self._cpp_operator = _operators.InterpolCtoN(
             self.k, *dimensions, dc_values, nc_values
         )
 

@@ -14,6 +14,7 @@ from pymole.pure.operators import (
     MimeticGradient as PureGradient,
     MimeticInterpol as PureInterpol,
     MimeticInterpolCtoF as PureInterpolCtoF,
+    MimeticInterpolCtoN as PureInterpolCtoN,
 )
 
 
@@ -195,6 +196,77 @@ def test_ctof_cpp_periodic_and_multidimensional_shapes(k, m, expected_entries):
         )
 
 
+@pytest.mark.parametrize(
+    ("k", "m", "first_col", "expected"),
+    [
+        (2, 5, 1, (0.5, 0.5)),
+        (4, 9, 0, (-16 / 112, 70 / 112, 70 / 112, -14 / 112, 2 / 112)),
+        (6, 13, 0, (-768 / 8448, 4158 / 8448, 6930 / 8448, -2772 / 8448,
+                    1188 / 8448, -330 / 8448, 42 / 8448)),
+        (8, 17, 0, (-1 / 15, 429 / 1024, 1001 / 1024, -3003 / 5120,
+                    429 / 1024, -715 / 3072, 91 / 1024, -21 / 1024, 11 / 5120)),
+    ],
+)
+def test_cton_cpp_binding_matches_pinned_reference_and_python(
+    k, m, first_col, expected
+):
+    """Validate native CtoN against pinned MOLE coefficients and pure Python."""
+    native = _native_backend()
+    native_operator = native.MimeticInterpolCtoN(m, k=k)
+    pure_operator = PureInterpolCtoN(m, k=k)
+
+    assert native_operator.matrix.shape == (m + 1, m + 2)
+    np.testing.assert_allclose(
+        native_operator.matrix.toarray(),
+        pure_operator.matrix.toarray(),
+        rtol=0,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        native_operator.matrix[1, first_col:first_col + len(expected)].toarray()[0],
+        expected,
+        rtol=0,
+        atol=1e-14,
+    )
+    raw_operator = native.InterpolCtoN(k, m, [1, 1], [0, 0])
+    assert raw_operator.shape() == (m + 1, m + 2)
+    np.testing.assert_allclose(
+        raw_operator.to_scipy_sparse().toarray(),
+        pure_operator.matrix.toarray(),
+        rtol=0,
+        atol=1e-14,
+    )
+
+
+def test_cton_cpp_periodic_and_multidimensional_shapes():
+    """Check native CtoN periodic stencils and tensor-product assembly."""
+    native = _native_backend()
+    periodic = native.MimeticInterpolCtoN(9, boundary="periodic", k=4)
+    assert periodic.matrix.shape == (9, 9)
+    assert periodic.matrix[0, 0] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 8] == pytest.approx(72 / 128)
+    assert periodic.matrix[0, 7] == pytest.approx(-8 / 128)
+    assert periodic.matrix[0, 1] == pytest.approx(-8 / 128)
+
+    for dimensions, boundary, expected_shape in (
+        ((9, 10), "nonperiodic", (110, 132)),
+        ((9, 10), "periodic", (90, 90)),
+        ((9, 10, 11), ("periodic", "nonperiodic", "periodic"), (1089, 1188)),
+    ):
+        native_grid = native.MimeticInterpolCtoN(dimensions, boundary=boundary, k=2)
+        pure_grid = PureInterpolCtoN(dimensions, boundary=boundary, k=2)
+        assert native_grid.matrix.shape == expected_shape
+        difference = (native_grid.matrix - pure_grid.matrix).tocsc()
+        np.testing.assert_allclose(difference.data, np.zeros_like(difference.data),
+                                   rtol=0, atol=1e-14)
+        np.testing.assert_allclose(
+            native_grid @ np.ones(expected_shape[1]),
+            np.ones(expected_shape[0]),
+            rtol=0,
+            atol=1e-14,
+        )
+
+
 def test_public_operator_signatures_match_python():
     """Keep backend-selectable operator constructors API-compatible."""
     native = _native_backend()
@@ -206,6 +278,7 @@ def test_public_operator_signatures_match_python():
         "MimeticLaplacian",
         "MimeticInterpol",
         "MimeticInterpolCtoF",
+        "MimeticInterpolCtoN",
         "MimeticRobinBC",
         "MimeticMixedBC",
     ):

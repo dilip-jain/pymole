@@ -38,6 +38,7 @@ __all__ = [
     'create_laplacian',
     'create_interpol',
     'create_interpol_c_to_f',
+    'create_interpol_c_to_n',
     'create_robin_bc',
     'create_mixed_bc',
     'add_scalar_bc',
@@ -117,6 +118,21 @@ def create_interpol_c_to_f(
         from . import cpp
         return cpp.MimeticInterpolCtoF(n, boundary=boundary, k=k, dc=dc, nc=nc)
     return pure.MimeticInterpolCtoF(n, boundary=boundary, k=k, dc=dc, nc=nc)
+
+
+def create_interpol_c_to_n(
+    n: GridSize,
+    boundary: Boundary = 'nonperiodic',
+    k: int = 2,
+    dc: Optional[Sequence[int]] = None,
+    nc: Optional[Sequence[int]] = None,
+):
+    """Create MOLE's center-to-node interpolation operator."""
+    if get_backend() == 'cpp':
+        # pylint: disable=import-outside-toplevel
+        from . import cpp
+        return cpp.MimeticInterpolCtoN(n, boundary=boundary, k=k, dc=dc, nc=nc)
+    return pure.MimeticInterpolCtoN(n, boundary=boundary, k=k, dc=dc, nc=nc)
 
 
 def create_robin_bc(

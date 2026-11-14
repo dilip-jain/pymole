@@ -12,6 +12,7 @@ from pymole import (
     create_laplacian,
     create_interpol,
     create_interpol_c_to_f,
+    create_interpol_c_to_n,
     create_robin_bc,
     create_mixed_bc,
     add_scalar_bc,
@@ -31,6 +32,7 @@ from pymole.pure.operators import (
     MimeticLaplacian,
     MimeticInterpol,
     MimeticInterpolCtoF,
+    MimeticInterpolCtoN,
     MimeticRobinBC as PureMimeticRobinBC,
     MimeticMixedBC as PureMimeticMixedBC,
 )
@@ -892,6 +894,91 @@ def test_ctof_factory_and_validation():
         use_backend(previous_backend)
 
 
+@pytest.mark.parametrize(
+    ("k", "m", "first_col", "expected_row"),
+    [
+        (2, 5, 1, (0.5, 0.5)),
+        (4, 9, 0, (-16 / 112, 70 / 112, 70 / 112, -14 / 112, 2 / 112)),
+        (6, 13, 0, (-768 / 8448, 4158 / 8448, 6930 / 8448, -2772 / 8448,
+                    1188 / 8448, -330 / 8448, 42 / 8448)),
+        (8, 17, 0, (-1 / 15, 429 / 1024, 1001 / 1024, -3003 / 5120,
+                    429 / 1024, -715 / 3072, 91 / 1024, -21 / 1024, 11 / 5120)),
+    ],
+)
+def test_cton_nonperiodic_1d_matches_pinned_mole_rows(k, m, first_col, expected_row):
+    """Check center-to-node boundary stencils from pinned MOLE C++."""
+    operator = MimeticInterpolCtoN(m, k=k)
+    matrix = operator.matrix.toarray()
+    assert matrix.shape == (m + 1, m + 2)
+    np.testing.assert_allclose(matrix[0, 0], 1.0)
+    np.testing.assert_allclose(
+        matrix[1, first_col:first_col + len(expected_row)], expected_row
+    )
+    np.testing.assert_allclose(matrix[m, m + 1], 1.0)
+    np.testing.assert_allclose(operator @ np.ones(m + 2), np.ones(m + 1))
+
+
+@pytest.mark.parametrize(
+    ("k", "m", "expected_entries"),
+    [
+        (2, 5, ((0, 0, 0.5), (0, 4, 0.5))),
+        (4, 9, ((0, 0, 72 / 128), (0, 8, 72 / 128),
+                (0, 7, -8 / 128), (0, 1, -8 / 128))),
+        (6, 13, ((0, 0, 600 / 1024), (0, 12, 600 / 1024),
+                 (0, 11, -100 / 1024), (0, 10, 12 / 1024),
+                 (0, 2, 12 / 1024), (0, 1, -100 / 1024))),
+        (8, 17, ((0, 0, 1225 / 2048), (0, 16, 1225 / 2048),
+                 (0, 15, -245 / 2048), (0, 14, 49 / 2048),
+                 (0, 13, -5 / 2048), (0, 3, -5 / 2048),
+                 (0, 2, 49 / 2048), (0, 1, -245 / 2048))),
+    ],
+)
+def test_cton_periodic_1d_matches_pinned_mole_rows(k, m, expected_entries):
+    """Check periodic center-to-node coefficients from pinned MOLE C++."""
+    operator = MimeticInterpolCtoN(m, boundary="periodic", k=k)
+    assert operator.matrix.shape == (m, m)
+    for row, column, expected in expected_entries:
+        assert operator.matrix[row, column] == pytest.approx(expected)
+    np.testing.assert_allclose(operator @ np.ones(m), np.ones(m))
+
+
+def test_cton_multidimensional_shapes_and_boundary_modes():
+    """Check tensor-product CtoN shapes and mixed-axis constant preservation."""
+    nonperiodic_2d = MimeticInterpolCtoN((9, 10), k=2)
+    periodic_2d = MimeticInterpolCtoN((9, 10), boundary="periodic", k=2)
+    mixed_3d = MimeticInterpolCtoN(
+        (9, 10, 11), boundary=("periodic", "nonperiodic", "periodic"), k=2
+    )
+
+    assert nonperiodic_2d.matrix.shape == (110, 132)
+    assert periodic_2d.matrix.shape == (90, 90)
+    assert mixed_3d.matrix.shape == (1089, 1188)
+    for operator in (nonperiodic_2d, periodic_2d, mixed_3d):
+        np.testing.assert_allclose(
+            operator @ np.ones(operator.matrix.shape[1]),
+            np.ones(operator.matrix.shape[0]),
+        )
+
+
+def test_cton_factory_and_validation():
+    """Check public construction and MOLE's CtoN constraints."""
+    previous_backend = get_backend()
+    use_backend("python")
+    try:
+        assert inspect.signature(create_interpol_c_to_n) == inspect.signature(
+            MimeticInterpolCtoN
+        )
+        assert create_interpol_c_to_n(9, k=2).matrix.shape == (10, 11)
+        with pytest.raises(ValueError, match="m > 2\\*k"):
+            MimeticInterpolCtoN(4, k=2)
+        with pytest.raises(ValueError, match="supports k"):
+            MimeticInterpolCtoN(9, k=3)
+        with pytest.raises(ValueError, match="dc and nc"):
+            MimeticInterpolCtoN(9, dc=[1, 1])
+    finally:
+        use_backend(previous_backend)
+
+
 def test_public_factories_cpp_matrix_parity():
     """Test: Native matrix parity for C++ backend."""
     _load_native_backend()
@@ -921,6 +1008,9 @@ def test_public_factories_cpp_matrix_parity():
         ), (
             create_interpol_c_to_f(9, k=2),
             MimeticInterpolCtoF(9, k=2)
+        ), (
+            create_interpol_c_to_n(9, k=2),
+            MimeticInterpolCtoN(9, k=2)
         ), (
             create_robin_bc(9, 0.125, k=2, a=2.0, b=0.5),
             PureMimeticRobinBC(9, 0.125, k=2, a=2.0, b=0.5)
