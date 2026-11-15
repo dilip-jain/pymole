@@ -12,7 +12,7 @@ Original MOLE Copyright (C) CSRC-SDSU
 Repository: https://github.com/csrc-sdsu/mole
 """
 
-from typing import Any, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Literal, Optional, Protocol, Sequence, Tuple, Union, overload
 
 import numpy as np
 from scipy import sparse
@@ -64,31 +64,212 @@ __all__ = [
 ]
 
 
-def _mole_operator_factory(name: str):
-    def construct(*args: Any, **kwargs: Any) -> Any:
-        if get_backend() == 'cpp':
-            # pylint: disable=import-outside-toplevel
-            from . import cpp
-            backend_module = cpp
-        else:
-            backend_module = pure
-        return getattr(backend_module, name)(*args, **kwargs)
-
-    construct.__name__ = name
-    construct.__qualname__ = name
-    return construct
+class _MoleOperator(Protocol):
+    def to_scipy_sparse(self) -> sparse.csc_matrix: ...
+    def apply(self, v: np.ndarray) -> np.ndarray: ...
+    def __matmul__(self, v: np.ndarray) -> np.ndarray: ...
+    def shape(self) -> Tuple[int, int]: ...
+    def nnz(self) -> int: ...
 
 
-Gradient = _mole_operator_factory('Gradient')
-Divergence = _mole_operator_factory('Divergence')
-Laplacian = _mole_operator_factory('Laplacian')
-Interpol = _mole_operator_factory('Interpol')
-InterpolCtoF = _mole_operator_factory('InterpolCtoF')
-InterpolCtoN = _mole_operator_factory('InterpolCtoN')
-InterpolFtoC = _mole_operator_factory('InterpolFtoC')
-InterpolNtoC = _mole_operator_factory('InterpolNtoC')
-RobinBC = _mole_operator_factory('RobinBC')
-MixedBC = _mole_operator_factory('MixedBC')
+class _MoleGradient(_MoleOperator, Protocol):
+    def getP(self) -> Sequence[float]: ...
+
+
+class _MoleDivergence(_MoleOperator, Protocol):
+    def getQ(self) -> Sequence[float]: ...
+
+
+def _dispatch_mole_operator(name: str, *args: Any, **kwargs: Any) -> Any:
+    if get_backend() == 'cpp':
+        # pylint: disable=import-outside-toplevel
+        from . import cpp
+        backend_module = cpp
+    else:
+        backend_module = pure
+    return getattr(backend_module, name)(*args, **kwargs)
+
+
+@overload
+def Gradient(k: int, m: int, dx: float) -> _MoleGradient: ...
+@overload
+def Gradient(k: int, m: int, n: int, dx: float, dy: float) -> _MoleGradient: ...
+@overload
+def Gradient(
+    k: int, m: int, n: int, o: int, dx: float, dy: float, dz: float
+) -> _MoleGradient: ...
+@overload
+def Gradient(
+    k: int, m: int, dx: float, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleGradient: ...
+@overload
+def Gradient(
+    k: int, m: int, n: int, dx: float, dy: float,
+    dc: Sequence[int], nc: Sequence[int],
+) -> _MoleGradient: ...
+@overload
+def Gradient(
+    k: int, m: int, n: int, o: int, dx: float, dy: float, dz: float,
+    dc: Sequence[int], nc: Sequence[int],
+) -> _MoleGradient: ...
+def Gradient(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('Gradient', *args, **kwargs)
+
+
+@overload
+def Divergence(k: int, m: int, dx: float) -> _MoleDivergence: ...
+@overload
+def Divergence(k: int, m: int, n: int, dx: float, dy: float) -> _MoleDivergence: ...
+@overload
+def Divergence(
+    k: int, m: int, n: int, o: int, dx: float, dy: float, dz: float
+) -> _MoleDivergence: ...
+@overload
+def Divergence(
+    k: int, m: int, dx: float, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleDivergence: ...
+@overload
+def Divergence(
+    k: int, m: int, n: int, dx: float, dy: float,
+    dc: Sequence[int], nc: Sequence[int],
+) -> _MoleDivergence: ...
+@overload
+def Divergence(
+    k: int, m: int, n: int, o: int, dx: float, dy: float, dz: float,
+    dc: Sequence[int], nc: Sequence[int],
+) -> _MoleDivergence: ...
+def Divergence(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('Divergence', *args, **kwargs)
+
+
+@overload
+def Laplacian(k: int, m: int, dx: float) -> _MoleOperator: ...
+@overload
+def Laplacian(k: int, m: int, n: int, dx: float, dy: float) -> _MoleOperator: ...
+@overload
+def Laplacian(
+    k: int, m: int, n: int, o: int, dx: float, dy: float, dz: float
+) -> _MoleOperator: ...
+def Laplacian(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('Laplacian', *args, **kwargs)
+
+
+@overload
+def Interpol(m: int, c: float) -> _MoleOperator: ...
+@overload
+def Interpol(m: int, n: int, c1: float, c2: float) -> _MoleOperator: ...
+@overload
+def Interpol(
+    m: int, n: int, o: int, c1: float, c2: float, c3: float
+) -> _MoleOperator: ...
+def Interpol(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('Interpol', *args, **kwargs)
+
+
+@overload
+def InterpolCtoF(
+    k: int, m: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolCtoF(
+    k: int, m: int, n: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolCtoF(
+    k: int, m: int, n: int, o: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+def InterpolCtoF(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('InterpolCtoF', *args, **kwargs)
+
+
+@overload
+def InterpolCtoN(
+    k: int, m: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolCtoN(
+    k: int, m: int, n: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolCtoN(
+    k: int, m: int, n: int, o: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+def InterpolCtoN(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('InterpolCtoN', *args, **kwargs)
+
+
+@overload
+def InterpolFtoC(
+    k: int, m: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolFtoC(
+    k: int, m: int, n: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolFtoC(
+    k: int, m: int, n: int, o: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+def InterpolFtoC(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('InterpolFtoC', *args, **kwargs)
+
+
+@overload
+def InterpolNtoC(
+    k: int, m: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolNtoC(
+    k: int, m: int, n: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+@overload
+def InterpolNtoC(
+    k: int, m: int, n: int, o: int, dc: Sequence[int], nc: Sequence[int]
+) -> _MoleOperator: ...
+def InterpolNtoC(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('InterpolNtoC', *args, **kwargs)
+
+
+@overload
+def RobinBC(k: int, m: int, dx: float, a: float, b: float) -> _MoleOperator: ...
+@overload
+def RobinBC(
+    k: int, m: int, dx: float, n: int, dy: float, a: float, b: float
+) -> _MoleOperator: ...
+@overload
+def RobinBC(
+    k: int, m: int, dx: float, n: int, dy: float, o: int, dz: float,
+    a: float, b: float,
+) -> _MoleOperator: ...
+def RobinBC(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('RobinBC', *args, **kwargs)
+
+
+@overload
+def MixedBC(
+    k: int, m: int, dx: float, left: str, coeffs_left: Sequence[float],
+    right: str, coeffs_right: Sequence[float],
+) -> _MoleOperator: ...
+@overload
+def MixedBC(
+    k: int, m: int, dx: float, n: int, dy: float,
+    left: str, coeffs_left: Sequence[float], right: str,
+    coeffs_right: Sequence[float], bottom: str,
+    coeffs_bottom: Sequence[float], top: str,
+    coeffs_top: Sequence[float],
+) -> _MoleOperator: ...
+@overload
+def MixedBC(
+    k: int, m: int, dx: float, n: int, dy: float, o: int, dz: float,
+    left: str, coeffs_left: Sequence[float], right: str,
+    coeffs_right: Sequence[float], bottom: str,
+    coeffs_bottom: Sequence[float], top: str,
+    coeffs_top: Sequence[float], front: str,
+    coeffs_front: Sequence[float], back: str,
+    coeffs_back: Sequence[float],
+) -> _MoleOperator: ...
+def MixedBC(*args: Any, **kwargs: Any) -> Any:
+    return _dispatch_mole_operator('MixedBC', *args, **kwargs)
 
 
 def create_gradient(

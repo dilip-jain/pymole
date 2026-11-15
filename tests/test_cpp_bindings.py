@@ -2,7 +2,7 @@
 
 import importlib
 import inspect
-from typing import Any, Literal, Tuple, Union, cast
+from typing import Any, Literal, Tuple, Union, cast, get_overloads
 
 import numpy as np
 import pytest
@@ -447,6 +447,30 @@ def test_public_operator_signatures_match_python():
     assert "boundary" not in inspect.signature(native.MimeticInterpol).parameters
 
 
+def test_package_root_constructor_overloads_match_pure_contract():
+    """Expose the same constructor overloads through the backend dispatcher."""
+    for name in (
+        "Gradient",
+        "Divergence",
+        "Laplacian",
+        "Interpol",
+        "InterpolCtoF",
+        "InterpolCtoN",
+        "InterpolFtoC",
+        "InterpolNtoC",
+        "RobinBC",
+        "MixedBC",
+    ):
+        public_overloads = get_overloads(getattr(pymole, name))
+        pure_overloads = get_overloads(getattr(pure, name).__init__)
+        assert len(public_overloads) == len(pure_overloads), name
+
+        for public_overload, pure_overload in zip(public_overloads, pure_overloads):
+            public_parameters = tuple(inspect.signature(public_overload).parameters.values())
+            pure_parameters = tuple(inspect.signature(pure_overload).parameters.values())[1:]
+            assert public_parameters == pure_parameters, name
+
+
 def test_mole_shaped_raw_constructors_match_both_backends():
     """Verify the public MOLE constructors are usable with either backend."""
     native = _native_backend()
@@ -507,11 +531,70 @@ def test_mole_shaped_raw_constructors_match_both_backends():
                 atol=1e-12,
             )
 
-        pymole.use_backend("cpp")
-        dispatched = pymole.Gradient(2, 8, 0.125)
-        assert dispatched.shape() == (9, 10)
+        for name in (
+            "InterpolCtoF",
+            "InterpolCtoN",
+            "InterpolFtoC",
+            "InterpolNtoC",
+        ):
+            for arguments in (
+                {"k": 2, "m": 9, "dc": [1, 1], "nc": [0, 0]},
+                {
+                    "k": 2, "m": 9, "n": 10,
+                    "dc": [1, 1, 1, 1], "nc": [0, 0, 0, 0],
+                },
+                {
+                    "k": 2, "m": 9, "n": 10, "o": 11,
+                    "dc": [1, 1, 1, 1, 1, 1],
+                    "nc": [0, 0, 0, 0, 0, 0],
+                },
+            ):
+                native_operator = getattr(native, name)(**arguments)
+                pure_operator = getattr(pure, name)(**arguments)
+                assert native_operator.shape() == pure_operator.shape()
+                if len(arguments) == 4:
+                    np.testing.assert_allclose(
+                        native_operator.to_scipy_sparse().toarray(),
+                        pure_operator.to_scipy_sparse().toarray(),
+                        rtol=0.0,
+                        atol=1e-12,
+                    )
+
+        for backend_name in ("python", "cpp"):
+            pymole.use_backend(backend_name)
+            dispatched = pymole.Gradient(k=2, m=8, dx=0.125)
+            assert dispatched.shape() == (9, 10)
+            dispatched_interpolator = pymole.InterpolCtoF(
+                k=2, m=9, dc=[1, 1], nc=[0, 0]
+            )
+            assert dispatched_interpolator.shape() == (10, 11)
     finally:
         pymole.use_backend(previous_backend)
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("Gradient", (3, 8, 0.125)),
+        ("Gradient", (2, 0, 0.125)),
+        ("Divergence", (2, 4, 0.125)),
+        ("Laplacian", (2, 4, 0.125)),
+        ("Interpol", (9, 1.5)),
+        ("Interpol", (3, 0.5)),
+        ("InterpolCtoF", (2, 9, [1], [0, 0])),
+        ("InterpolCtoN", (2, 9, [1], [0, 0])),
+        ("InterpolFtoC", (2, 9, [1], [0, 0])),
+        ("InterpolNtoC", (2, 9, [1], [0, 0])),
+        ("RobinBC", (3, 9, 0.125, 1.0, 0.5)),
+        ("MixedBC", (2, 9, 0.125, "Invalid", [1.0], "Neumann", [0.0])),
+    ],
+)
+def test_mole_constructor_validation_matches_across_backends(name, arguments):
+    """Reject invalid MOLE constructor inputs consistently on both backends."""
+    native = _native_backend()
+    for backend in (pure, native):
+        with pytest.raises(ValueError):
+            getattr(backend, name)(*arguments)
 
 
 @pytest.mark.parametrize(

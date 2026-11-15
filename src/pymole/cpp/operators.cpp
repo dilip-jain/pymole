@@ -7,6 +7,9 @@
 #define ARMA_USE_SUPERLU
 #include <armadillo>
 
+#include <cmath>
+#include <stdexcept>
+
 #include <gradient.h>
 #include <divergence.h>
 #include <laplacian.h>
@@ -21,6 +24,98 @@
 
 namespace py = pybind11;
 using namespace arma;
+
+void validate_order(int k) {
+    if (k != 2 && k != 4 && k != 6 && k != 8) {
+        throw std::invalid_argument("MOLE supports k in {2, 4, 6, 8}");
+    }
+}
+
+void validate_stencil_inputs(
+    int k,
+    const std::vector<arma::u32>& dimensions,
+    const std::vector<double>& spacings,
+    bool strict_minimum,
+    bool divergence = false,
+    const std::vector<int>* dc = nullptr,
+    const std::vector<int>* nc = nullptr
+) {
+    validate_order(k);
+    if (dimensions.empty() || dimensions.size() > 3 ||
+        dimensions.size() != spacings.size()) {
+        throw std::invalid_argument("Grid dimensions and spacings must match in 1D, 2D, or 3D");
+    }
+    if ((dc == nullptr) != (nc == nullptr)) {
+        throw std::invalid_argument("dc and nc must be supplied together");
+    }
+    if (dc != nullptr) {
+        const std::size_t expected = 2 * dimensions.size();
+        if (dc->size() != expected || nc->size() != expected) {
+            throw std::invalid_argument("dc and nc must contain two coefficients per axis");
+        }
+    }
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        const arma::u32 size = dimensions[axis];
+        const double spacing = spacings[axis];
+        if (size == 0) {
+            throw std::invalid_argument("Grid dimensions must be positive");
+        }
+        if (!std::isfinite(spacing) || spacing <= 0.0) {
+            throw std::invalid_argument("Grid spacings must be positive and finite");
+        }
+        bool require_strict_minimum = strict_minimum;
+        if (divergence && dc != nullptr) {
+            const std::size_t first = 2 * axis;
+            const bool periodic = (*dc)[first] == 0 && (*dc)[first + 1] == 0 &&
+                (*nc)[first] == 0 && (*nc)[first + 1] == 0;
+            require_strict_minimum = !periodic;
+        }
+        const arma::u32 minimum = static_cast<arma::u32>(2 * k);
+        if ((require_strict_minimum && size <= minimum) ||
+            (!require_strict_minimum && size < minimum)) {
+            throw std::invalid_argument(
+                require_strict_minimum
+                    ? "MOLE requires grid dimensions greater than 2*k"
+                    : "MOLE requires grid dimensions at least 2*k"
+            );
+        }
+    }
+}
+
+void validate_interpolation_inputs(
+    const std::vector<arma::u32>& dimensions,
+    const std::vector<double>& weights
+) {
+    if (dimensions.empty() || dimensions.size() > 3 ||
+        dimensions.size() != weights.size()) {
+        throw std::invalid_argument("Grid dimensions and interpolation weights must match in 1D, 2D, or 3D");
+    }
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        if (dimensions[axis] < 4) {
+            throw std::invalid_argument("MOLE interpolation requires grid dimensions of at least 4");
+        }
+        if (!std::isfinite(weights[axis]) ||
+            weights[axis] < 0.0 || weights[axis] > 1.0) {
+            throw std::invalid_argument("Interpolation weights must be in [0, 1]");
+        }
+    }
+}
+
+void validate_boundary_condition(
+    const std::string& condition,
+    const std::vector<double>& coefficients
+) {
+    if (condition != "Dirichlet" && condition != "Neumann" &&
+        condition != "Robin") {
+        throw std::invalid_argument("Unknown boundary condition type: " + condition);
+    }
+    const std::size_t required = condition == "Robin" ? 2 : 1;
+    if (coefficients.size() < required) {
+        throw std::invalid_argument(
+            condition + " boundary requires " + std::to_string(required) + " coefficient(s)"
+        );
+    }
+}
 
 /**
  * Convert Armadillo sparse matrix to scipy-compatible format (CSC)
@@ -345,18 +440,23 @@ void bind_sparse_matrix_methods(py::class_<T>& type) {
 template<typename T>
 void bind_directional_interpolator(py::module_& module, const char* name) {
       py::class_<T> type(module, name);
-      type.def(py::init([](arma::u16 k, arma::u32 m,
+      type.def(py::init([](int k, arma::u32 m,
                                 const std::vector<int>& dc, const std::vector<int>& nc) {
-                 return T(k, m, to_arma_ivec(dc), to_arma_ivec(nc));
-            }))
-           .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n,
+                 validate_stencil_inputs(k, {m}, {1.0}, true, false, &dc, &nc);
+                 return T(static_cast<arma::u16>(k), m, to_arma_ivec(dc), to_arma_ivec(nc));
+            }), py::arg("k"), py::arg("m"), py::arg("dc"), py::arg("nc"))
+           .def(py::init([](int k, arma::u32 m, arma::u32 n,
                                 const std::vector<int>& dc, const std::vector<int>& nc) {
-                 return T(k, m, n, to_arma_ivec(dc), to_arma_ivec(nc));
-            }))
-           .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n, arma::u32 o,
+                 validate_stencil_inputs(k, {m, n}, {1.0, 1.0}, true, false, &dc, &nc);
+                 return T(static_cast<arma::u16>(k), m, n, to_arma_ivec(dc), to_arma_ivec(nc));
+            }), py::arg("k"), py::arg("m"), py::arg("n"),
+                py::arg("dc"), py::arg("nc"))
+           .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
                                 const std::vector<int>& dc, const std::vector<int>& nc) {
-                 return T(k, m, n, o, to_arma_ivec(dc), to_arma_ivec(nc));
-            }));
+                 validate_stencil_inputs(k, {m, n, o}, {1.0, 1.0, 1.0}, true, false, &dc, &nc);
+                 return T(static_cast<arma::u16>(k), m, n, o, to_arma_ivec(dc), to_arma_ivec(nc));
+            }), py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"),
+                py::arg("dc"), py::arg("nc"));
       bind_sparse_matrix_methods(type);
 }
 
@@ -382,7 +482,10 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== Gradient Operator ====================
      py::class_<Gradient>(m, "Gradient")
-        .def(py::init<arma::u16, arma::u32, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx) {
+            validate_stencil_inputs(k, {m}, {dx}, false);
+            return Gradient(static_cast<arma::u16>(k), m, dx);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"),
              "1D Gradient operator constructor\n"
              "Args:\n"
@@ -390,7 +493,10 @@ PYBIND11_MODULE(_operators, m) {
              "  m: Number of grid points\n"
              "  dx: Grid spacing")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, double dx, double dy) {
+            validate_stencil_inputs(k, {m, n}, {dx, dy}, false);
+            return Gradient(static_cast<arma::u16>(k), m, n, dx, dy);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("dx"), py::arg("dy"),
              "2D Gradient operator constructor\n"
              "Args:\n"
@@ -400,7 +506,11 @@ PYBIND11_MODULE(_operators, m) {
              "  dx: Grid spacing in x-direction\n"
              "  dy: Grid spacing in y-direction")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
+                         double dx, double dy, double dz) {
+            validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, false);
+            return Gradient(static_cast<arma::u16>(k), m, n, o, dx, dy, dz);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"), 
              py::arg("dx"), py::arg("dy"), py::arg("dz"),
              "3D Gradient operator constructor\n"
@@ -412,19 +522,24 @@ PYBIND11_MODULE(_operators, m) {
              "  dx: Grid spacing in x-direction\n"
              "  dy: Grid spacing in y-direction\n"
              "  dz: Grid spacing in z-direction")
-        .def(py::init([](arma::u16 k, arma::u32 m, double dx,
+        .def(py::init([](int k, arma::u32 m, double dx,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Gradient(k, m, dx, to_arma_ivec(dc), to_arma_ivec(nc));
+             validate_stencil_inputs(k, {m}, {dx}, false, false, &dc, &nc);
+             return Gradient(static_cast<arma::u16>(k), m, dx,
+                             to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("dc"), py::arg("nc"))
-        .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n, double dx, double dy,
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, double dx, double dy,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Gradient(k, m, n, dx, dy, to_arma_ivec(dc), to_arma_ivec(nc));
+             validate_stencil_inputs(k, {m, n}, {dx, dy}, false, false, &dc, &nc);
+             return Gradient(static_cast<arma::u16>(k), m, n, dx, dy,
+                             to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("n"), py::arg("dx"),
              py::arg("dy"), py::arg("dc"), py::arg("nc"))
-        .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n, arma::u32 o,
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
                          double dx, double dy, double dz,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Gradient(k, m, n, o, dx, dy, dz,
+             validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, false, false, &dc, &nc);
+             return Gradient(static_cast<arma::u16>(k), m, n, o, dx, dy, dz,
                              to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"),
              py::arg("dx"), py::arg("dy"), py::arg("dz"), py::arg("dc"), py::arg("nc"))
@@ -455,7 +570,10 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== Divergence Operator ====================
      py::class_<Divergence>(m, "Divergence")
-        .def(py::init<arma::u16, arma::u32, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx) {
+            validate_stencil_inputs(k, {m}, {dx}, true, true);
+            return Divergence(static_cast<arma::u16>(k), m, dx);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"),
              "1D Divergence operator constructor\n"
              "Args:\n"
@@ -463,7 +581,10 @@ PYBIND11_MODULE(_operators, m) {
              "  m: Number of grid points\n"
              "  dx: Grid spacing")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, double dx, double dy) {
+            validate_stencil_inputs(k, {m, n}, {dx, dy}, true, true);
+            return Divergence(static_cast<arma::u16>(k), m, n, dx, dy);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("dx"), py::arg("dy"),
              "2D Divergence operator constructor\n"
              "Args:\n"
@@ -473,7 +594,11 @@ PYBIND11_MODULE(_operators, m) {
              "  dx: Grid spacing in x-direction\n"
              "  dy: Grid spacing in y-direction")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
+                         double dx, double dy, double dz) {
+            validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, true, true);
+            return Divergence(static_cast<arma::u16>(k), m, n, o, dx, dy, dz);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"), 
              py::arg("dx"), py::arg("dy"), py::arg("dz"),
              "3D Divergence operator constructor\n"
@@ -485,19 +610,24 @@ PYBIND11_MODULE(_operators, m) {
              "  dx: Grid spacing in x-direction\n"
              "  dy: Grid spacing in y-direction\n"
              "  dz: Grid spacing in z-direction")
-        .def(py::init([](arma::u16 k, arma::u32 m, double dx,
+        .def(py::init([](int k, arma::u32 m, double dx,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Divergence(k, m, dx, to_arma_ivec(dc), to_arma_ivec(nc));
+             validate_stencil_inputs(k, {m}, {dx}, true, true, &dc, &nc);
+             return Divergence(static_cast<arma::u16>(k), m, dx,
+                               to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("dc"), py::arg("nc"))
-        .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n, double dx, double dy,
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, double dx, double dy,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Divergence(k, m, n, dx, dy, to_arma_ivec(dc), to_arma_ivec(nc));
+             validate_stencil_inputs(k, {m, n}, {dx, dy}, true, true, &dc, &nc);
+             return Divergence(static_cast<arma::u16>(k), m, n, dx, dy,
+                               to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("n"), py::arg("dx"),
              py::arg("dy"), py::arg("dc"), py::arg("nc"))
-        .def(py::init([](arma::u16 k, arma::u32 m, arma::u32 n, arma::u32 o,
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
                          double dx, double dy, double dz,
                          const std::vector<int>& dc, const std::vector<int>& nc) {
-             return Divergence(k, m, n, o, dx, dy, dz,
+             validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, true, true, &dc, &nc);
+             return Divergence(static_cast<arma::u16>(k), m, n, o, dx, dy, dz,
                                to_arma_ivec(dc), to_arma_ivec(nc));
         }), py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"),
              py::arg("dx"), py::arg("dy"), py::arg("dz"), py::arg("dc"), py::arg("nc"))
@@ -528,7 +658,10 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== Laplacian Operator ====================
      py::class_<Laplacian>(m, "Laplacian")
-        .def(py::init<arma::u16, arma::u32, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx) {
+            validate_stencil_inputs(k, {m}, {dx}, true);
+            return Laplacian(static_cast<arma::u16>(k), m, dx);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"),
              "1D Laplacian operator constructor\n"
              "Args:\n"
@@ -536,7 +669,10 @@ PYBIND11_MODULE(_operators, m) {
              "  m: Number of grid points\n"
              "  dx: Grid spacing")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, double dx, double dy) {
+            validate_stencil_inputs(k, {m, n}, {dx, dy}, true);
+            return Laplacian(static_cast<arma::u16>(k), m, n, dx, dy);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("dx"), py::arg("dy"),
              "2D Laplacian operator constructor\n"
              "Args:\n"
@@ -546,7 +682,11 @@ PYBIND11_MODULE(_operators, m) {
              "  dx: Grid spacing in x-direction\n"
              "  dy: Grid spacing in y-direction")
         
-        .def(py::init<arma::u16, arma::u32, arma::u32, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, arma::u32 n, arma::u32 o,
+                         double dx, double dy, double dz) {
+            validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, true);
+            return Laplacian(static_cast<arma::u16>(k), m, n, o, dx, dy, dz);
+        }),
              py::arg("k"), py::arg("m"), py::arg("n"), py::arg("o"), py::arg("dx"), py::arg("dy"), py::arg("dz"),
              "3D Laplacian operator constructor\n"
              "Args:\n"
@@ -580,14 +720,20 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== Interpolation Operator ====================
      py::class_<Interpol>(m, "Interpol")
-        .def(py::init<arma::u32, double>(),
+        .def(py::init([](arma::u32 m, double c) {
+            validate_interpolation_inputs({m}, {c});
+            return Interpol(m, c);
+        }),
              py::arg("m"), py::arg("c"),
              "1D Interpolation operator constructor\n"
              "Args:\n"
              "  m: Number of grid points\n"
              "  c: Weight for ends (0.0 <= c <= 1.0)")
         
-        .def(py::init<arma::u32, arma::u32, double, double>(),
+        .def(py::init([](arma::u32 m, arma::u32 n, double c1, double c2) {
+            validate_interpolation_inputs({m, n}, {c1, c2});
+            return Interpol(m, n, c1, c2);
+        }),
              py::arg("m"), py::arg("n"), py::arg("c1"), py::arg("c2"),
              "2D Interpolation operator constructor\n"
              "Args:\n"
@@ -596,7 +742,11 @@ PYBIND11_MODULE(_operators, m) {
              "  c1: Weight for ends in x-direction (0.0 <= c1 <= 1.0)\n"
              "  c2: Weight for ends in y-direction (0.0 <= c2 <= 1.0)")
         
-        .def(py::init<arma::u32, arma::u32, arma::u32, double, double, double>(),
+        .def(py::init([](arma::u32 m, arma::u32 n, arma::u32 o,
+                         double c1, double c2, double c3) {
+            validate_interpolation_inputs({m, n, o}, {c1, c2, c3});
+            return Interpol(m, n, o, c1, c2, c3);
+        }),
              py::arg("m"), py::arg("n"), py::arg("o"), 
              py::arg("c1"), py::arg("c2"), py::arg("c3"),
              "3D Interpolation operator constructor\n"
@@ -630,7 +780,10 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== RobinBC Boundary Condition ====================
      py::class_<RobinBC>(m, "RobinBC")
-        .def(py::init<arma::u16, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx, double a, double b) {
+            validate_stencil_inputs(k, {m}, {dx}, false);
+            return RobinBC(static_cast<arma::u16>(k), m, dx, a, b);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("a"), py::arg("b"),
              "1D Robin Boundary Condition constructor\n"
              "Boundary condition: a*u + b*du/dn = f\n"
@@ -641,7 +794,11 @@ PYBIND11_MODULE(_operators, m) {
              "  a: Coefficient of Dirichlet component\n"
              "  b: Coefficient of Neumann component")
         
-        .def(py::init<arma::u16, arma::u32, double, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx, arma::u32 n,
+                         double dy, double a, double b) {
+            validate_stencil_inputs(k, {m, n}, {dx, dy}, false);
+            return RobinBC(static_cast<arma::u16>(k), m, dx, n, dy, a, b);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("n"), 
              py::arg("dy"), py::arg("a"), py::arg("b"),
              "2D Robin Boundary Condition constructor\n"
@@ -655,7 +812,11 @@ PYBIND11_MODULE(_operators, m) {
              "  a: Coefficient of Dirichlet component\n"
              "  b: Coefficient of Neumann component")
         
-        .def(py::init<arma::u16, arma::u32, double, arma::u32, double, arma::u32, double, double, double>(),
+        .def(py::init([](int k, arma::u32 m, double dx, arma::u32 n, double dy,
+                         arma::u32 o, double dz, double a, double b) {
+            validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, false);
+            return RobinBC(static_cast<arma::u16>(k), m, dx, n, dy, o, dz, a, b);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("n"), py::arg("dy"), 
              py::arg("o"), py::arg("dz"), py::arg("a"), py::arg("b"),
              "3D Robin Boundary Condition constructor\n"
@@ -693,9 +854,15 @@ PYBIND11_MODULE(_operators, m) {
     
     // ==================== MixedBC Boundary Condition ====================
      py::class_<MixedBC>(m, "MixedBC")
-        .def(py::init<arma::u16, arma::u32, double, const std::string&, 
-                      const std::vector<double>&, const std::string&, 
-                      const std::vector<double>&>(),
+        .def(py::init([](int k, arma::u32 m, double dx,
+                         const std::string& left, const std::vector<double>& coeffs_left,
+                         const std::string& right, const std::vector<double>& coeffs_right) {
+            validate_stencil_inputs(k, {m}, {dx}, false);
+            validate_boundary_condition(left, coeffs_left);
+            validate_boundary_condition(right, coeffs_right);
+            return MixedBC(static_cast<arma::u16>(k), m, dx, left, coeffs_left,
+                           right, coeffs_right);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), 
              py::arg("left"), py::arg("coeffs_left"),
              py::arg("right"), py::arg("coeffs_right"),
@@ -709,11 +876,20 @@ PYBIND11_MODULE(_operators, m) {
              "  right: BC type at right boundary ('Dirichlet', 'Neumann', 'Robin')\n"
              "  coeffs_right: Coefficients for right BC")
         
-        .def(py::init<arma::u16, arma::u32, double, arma::u32, double,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&>(),
+        .def(py::init([](int k, arma::u32 m, double dx, arma::u32 n, double dy,
+                         const std::string& left, const std::vector<double>& coeffs_left,
+                         const std::string& right, const std::vector<double>& coeffs_right,
+                         const std::string& bottom, const std::vector<double>& coeffs_bottom,
+                         const std::string& top, const std::vector<double>& coeffs_top) {
+            validate_stencil_inputs(k, {m, n}, {dx, dy}, false);
+            validate_boundary_condition(left, coeffs_left);
+            validate_boundary_condition(right, coeffs_right);
+            validate_boundary_condition(bottom, coeffs_bottom);
+            validate_boundary_condition(top, coeffs_top);
+            return MixedBC(static_cast<arma::u16>(k), m, dx, n, dy,
+                           left, coeffs_left, right, coeffs_right,
+                           bottom, coeffs_bottom, top, coeffs_top);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("n"), py::arg("dy"),
              py::arg("left"), py::arg("coeffs_left"),
              py::arg("right"), py::arg("coeffs_right"),
@@ -735,13 +911,26 @@ PYBIND11_MODULE(_operators, m) {
              "  top: BC type at top boundary ('Dirichlet', 'Neumann', 'Robin')\n"
              "  coeffs_top: Coefficients for top BC")
         
-        .def(py::init<arma::u16, arma::u32, double, arma::u32, double, arma::u32, double,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&,
-                      const std::string&, const std::vector<double>&>(),
+        .def(py::init([](int k, arma::u32 m, double dx, arma::u32 n, double dy,
+                         arma::u32 o, double dz,
+                         const std::string& left, const std::vector<double>& coeffs_left,
+                         const std::string& right, const std::vector<double>& coeffs_right,
+                         const std::string& bottom, const std::vector<double>& coeffs_bottom,
+                         const std::string& top, const std::vector<double>& coeffs_top,
+                         const std::string& front, const std::vector<double>& coeffs_front,
+                         const std::string& back, const std::vector<double>& coeffs_back) {
+            validate_stencil_inputs(k, {m, n, o}, {dx, dy, dz}, false);
+            validate_boundary_condition(left, coeffs_left);
+            validate_boundary_condition(right, coeffs_right);
+            validate_boundary_condition(bottom, coeffs_bottom);
+            validate_boundary_condition(top, coeffs_top);
+            validate_boundary_condition(front, coeffs_front);
+            validate_boundary_condition(back, coeffs_back);
+            return MixedBC(static_cast<arma::u16>(k), m, dx, n, dy, o, dz,
+                           left, coeffs_left, right, coeffs_right,
+                           bottom, coeffs_bottom, top, coeffs_top,
+                           front, coeffs_front, back, coeffs_back);
+        }),
              py::arg("k"), py::arg("m"), py::arg("dx"), py::arg("n"), py::arg("dy"),
              py::arg("o"), py::arg("dz"),
              py::arg("left"), py::arg("coeffs_left"),
